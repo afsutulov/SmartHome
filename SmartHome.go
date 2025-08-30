@@ -13,49 +13,26 @@ import (
 )
 
 const (
-    botToken string	= "TOKEN"
+    botToken string	= "TOKEN" // Токен от Telegram bot
     rtsp string		= "rtsp://login:password@192.168.1.6:554/media/video1" // адрес RTSP потока для скриншотов
     video_lock string	= "/share/video.save" // Файл с ссылкой на последнее видео, говоряйщий о том, что появилось движение в камере
-    MQTTServer string	= "tcp://192.168.1.2:1883"
-    MQTTLogin string	= "login"
-    MQTTPasswd string	= "password"
+    MQTTServer string	= "tcp://192.168.1.2:1883" // Адрес MQTT сервера
+    MQTTLogin string	= "login" // Логин для подключения к MQTT серверу
+    MQTTPasswd string	= "password" // Пароль к MQTT серверу
+    TmpFile string	= "/share/SmartHome.json" // Файл, куда сохраняется текущее состояние датчиков
 )
 
 var (
     UsersID = [][]int64{{0000000000, 0}, {111111111, 0}, {2222222222, 0}} // Список пользователй, кому разрешено пользоваться ботом
     topic = [2] string{"zigbee2mqtt", "yandex"} // Топик в базе MQTT
     WoW = [2] string{"ВЫКЛ", "ВКЛ"} // Названия статусов
-    // Идентификаторы датчиков затопления
-    AlarmID = [][]any{
-	{"0x00158d0006c50eb5", "Кухня под мойкой", false, 0},
-	{"0x00158d0006c5d0d8", "Кладовка в нише у счетчиков", false, 0},
-	{"0x00158d000725e347", "В туалете под унитазом", false, 0},
-	{"0x00158d0006d394bd", "В туалете за зеркалом", false, 0},
-	{"0x00158d00072b56e0", "Ванная у стиральной машины", false, 0},
-	{"0x00158d0006d39e38", "Ванная под раковиной", false, 0},
-	{"0x00158d0006d2e247", "Ванная в нише за унитазом", false, 0},
-	{"0x00158d0006ca1faf", "Ванная в нише у счетчиков", false, 0}}
-
-    // Идентификаторы устройств умного дома
-    // {ИДЕНТИФИКАТОР ZIGBEE, ИДЕНТИФИКАТОР YANDEX, ОПИСАНИЕ, СОСТОЯНИЕ}
-    // Датчик температуры, Температура, Влажность, Давление, Заряд батареи, Дата и вреся
-    // МЫ УШЛИ, СОСТОЯНИЕ)
-    // ВИДЕОКОНТРОЛЬ, СОСТОЯНИЕ)
-    DeviceID = [][]any{
-	{"0x540f57fffe8ec162", "Polotense01", "Полотенцесушитель", true},
-	{"0x54ef441000376ad3", "Voda01", "Вода в ванной", true},
-	{"0x54ef4410003aad6f", "Voda02", "Вода на кухне", true},
-	{"0x00158d00073a6302", "Svet01", "Свет", true},
-	{"0x00158d00073a89a6", "Plita01", "Электроплита", true, "Rozetki01", "Розетки", true},
-	{"0xa4c13841d71f4d76", "Сирена"},
-	{"0x00158d0006c58566", "Кнопка пришли/ушли", 0},
-	{"0x00158d0006c5fa47", "Pogoda01", "Датчик температуры", 0.0, 0.0, 0.0, 0, "01-01-2025 00:00"},
-	{"\"МЫ УШЛИ\"", false}}
-	bot *tgbotapi.BotAPI
-	client mqtt.Client
-	err error
-    LastAlarm = [] int64 {1735671600, 1735671600, 1735671600, 1735671600, 1735671600, 1735671600, 1735671600, 1735671600} // Последнее обновление устройств
-    LastDevice = [] int64 {1735671600, 1735671600, 1735671600, 1735671600, 1735671600, 1735671600, 1735671600, 1735671600} // Последнее обновление устройств
+    DeviceID = [][]any{{},{},{},{},{},{},{},{},{}}
+    AlarmID = [][]any{{},{},{},{},{},{},{},{}}
+    LastAlarm = []int64{}
+    LastDevice = []int64{}
+    bot *tgbotapi.BotAPI
+    client mqtt.Client
+    err error
 )
 
 // Переводим bool в string
@@ -343,6 +320,79 @@ func Zatoplenie(Num int) {
     DevOnOff(5, true)
 }
 
+// Если не удалось прочитать сохраненные данные устройств из файла TmpFile, то устанавливаем значения по умолчанию
+func SetDataDefault(){
+    // Идентификаторы устройств умного дома
+    // {ИДЕНТИФИКАТОР ZIGBEE, ИДЕНТИФИКАТОР YANDEX, ОПИСАНИЕ, СОСТОЯНИЕ}
+    // Датчик температуры, Температура, Влажность, Давление, Заряд батареи, Дата и вреся
+    // МЫ УШЛИ, СОСТОЯНИЕ)
+    // ВИДЕОКОНТРОЛЬ, СОСТОЯНИЕ)
+    DeviceID = [][]any{
+	{"0x540f57fffe8ec162", "Polotense01", "Полотенцесушитель", true},
+	{"0x54ef441000376ad3", "Voda01", "Вода в ванной", true},
+	{"0x54ef4410003aad6f", "Voda02", "Вода на кухне", true},
+	{"0x00158d00073a6302", "Svet01", "Свет", true},
+	{"0x00158d00073a89a6", "Plita01", "Электроплита", true, "Rozetki01", "Розетки", true},
+	{"0xa4c13841d71f4d76", "Сирена"},
+	{"0x00158d0006c58566", "Кнопка пришли/ушли", 0},
+	{"0x00158d0006c5fa47", "Pogoda01", "Датчик температуры", 0.0, 0.0, 0.0, 0, "01-01-2025 00:00"},
+	{"\"МЫ УШЛИ\"", false} }
+    // Идентификаторы датчиков затопления
+    AlarmID = [][]any{
+	{"0x00158d0006c50eb5", "Кухня под мойкой", false, 0},
+	{"0x00158d0006c5d0d8", "Кладовка в нише у счетчиков", false, 0},
+	{"0x00158d008b64810c", "В туалете под унитазом", false, 0},
+	{"0x00158d0006d394bd", "В туалете за зеркалом", false, 0},
+	{"0x00158d00072b56e0", "Ванная у стиральной машины", false, 0},
+	{"0x00158d0006d39e38", "Ванная под раковиной", false, 0},
+	{"0x00158d0006d2e247", "Ванная в нише за унитазом", false, 0},
+	{"0x00158d0006ca1faf", "Ванная в нише у счетчиков", false, 0} }
+    LastAlarm = []int64{1735671600, 1735671600, 1735671600, 1735671600, 1735671600, 1735671600, 1735671600, 1735671600}
+    LastDevice = []int64{1735671600, 1735671600, 1735671600, 1735671600, 1735671600, 1735671600, 1735671600, 1735671600}
+}
+
+// Сохраняем состояние устройств в файл  TmpFile
+func SaveDataToFile() {
+    file, err := os.Create(TmpFile)
+    if err != nil { return }
+    defer file.Close()
+    data := struct {
+	DeviceID   [][]any `json:"devices"`
+	AlarmID   [][]any `json:"alarms"`
+	LastAlarm []int64 `json:"last_alarm"`
+	LastDevice[]int64 `json:"last_device"`
+    }{
+	DeviceID:	DeviceID,
+	AlarmID:	AlarmID,
+	LastAlarm:	LastAlarm,
+	LastDevice:	LastDevice,
+    }
+    encoder := json.NewEncoder(file)
+    encoder.SetIndent("", "  ")
+    err = encoder.Encode(data)
+    if err != nil { return }
+}
+
+// Загружаем послденее сохраненное состояние устройств из файла TmpFile
+func LoadDataFromFile() {
+    var readData struct {
+	DeviceID	[][]any `json:"devices"`
+	AlarmID		[][]any `json:"alarms"`
+	LastAlarm	[]int64 `json:"last_alarm"`
+	LastDevice	[]int64 `json:"last_device"`
+    }
+    file, err := os.Open(TmpFile)
+    if err != nil { SetDataDefault(); return }
+    defer file.Close()
+    decoder := json.NewDecoder(file)
+    err = decoder.Decode(&readData)
+    if err != nil { SetDataDefault(); return }
+    DeviceID = readData.DeviceID
+    AlarmID = readData.AlarmID
+    LastAlarm = readData.LastAlarm
+    LastDevice = readData.LastDevice
+}
+
 // Обработка сообщений от MQTT брокера
 func on_message(client mqtt.Client, msg mqtt.Message) {
     DevID := strings.ReplaceAll(msg.Topic(), topic[0]+"/", "")
@@ -448,6 +498,7 @@ func on_message(client mqtt.Client, msg mqtt.Message) {
 	}
     }
     }
+    SaveDataToFile()
 }
 
 func connectMQTT() mqtt.Client {
@@ -487,6 +538,8 @@ func subscribe(client mqtt.Client, tpc string) {
 }
 
 func main() {
+    LoadDataFromFile() // Загружаем последние сохраненные данные устройств. Если неудачн - заполняем данныыми по умолчанию
+
     // Инициируем подключение к Telegram bot
     for {
 	bot, err = tgbotapi.NewBotAPI(botToken)
@@ -525,7 +578,6 @@ func main() {
     for i := 0; i < len(AlarmID); i++ {
 	subscribe(client, topic[0]+"/"+AlarmID[i][0].(string))
     }
-//    defer client.Disconnect(250)
 
     // Запуск горутины для таймера включения и выключения полотенцесушителя
     go func() {
