@@ -8,22 +8,27 @@ import (
     "io/ioutil"
     "strings"
     "encoding/json"
-    "github.com/go-telegram-bot-api/telegram-bot-api"
+    "context"
+    "net"
+    "net/http"
+    tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api"
+    "golang.org/x/net/proxy"
     mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 const (
     botToken string	= "TOKEN" // Токен от Telegram bot
-    rtsp string		= "rtsp://login:password@192.168.1.6:554/media/video1" // адрес RTSP потока для скриншотов
+    rtsp string		= "rtsp://user:password0@192.168.1.6:554/media/video1" // адрес RTSP потока для скриншотов
     video_lock string	= "/share/video.save" // Файл с ссылкой на последнее видео, говоряйщий о том, что появилось движение в камере
     MQTTServer string	= "tcp://192.168.1.2:1883" // Адрес MQTT сервера
     MQTTLogin string	= "login" // Логин для подключения к MQTT серверу
     MQTTPasswd string	= "password" // Пароль к MQTT серверу
     TmpFile string	= "/share/SmartHome.json" // Файл, куда сохраняется текущее состояние датчиков
+    PROXY string	= "192.168.1.1:7080" // Адрес SOCKS5 прокси сервера
 )
 
 var (
-    UsersID = [][]int64{{0000000000, 0}, {111111111, 0}, {2222222222, 0}} // Список пользователй, кому разрешено пользоваться ботом
+    UsersID = [][]int64{{0000000000, 0}, {1111111111, 0}, {2222222222, 0}} // Список пользователй, кому разрешено пользоваться ботом
     topic = [2] string{"zigbee2mqtt", "yandex"} // Топик в базе MQTT
     WoW = [2] string{"ВЫКЛ", "ВКЛ"} // Названия статусов
     DeviceID = [][]any{{},{},{},{},{},{},{},{},{}}
@@ -540,18 +545,37 @@ func subscribe(client mqtt.Client, tpc string) {
 func main() {
     LoadDataFromFile() // Загружаем последние сохраненные данные устройств. Если неудачн - заполняем данныыми по умолчанию
 
+    // Инициируем подключение через SOCKS5
+    dialer, err := proxy.SOCKS5("tcp", PROXY, nil, proxy.Direct)
+    if err != nil { panic(err) }
+
+    httpClient := &http.Client{
+	Transport: &http.Transport{
+	    DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return dialer.Dial(network, addr)
+	    },
+	},
+	Timeout: 70 * time.Second,
+    }
+
+//    var bot *tgbotapi.BotAPI
+
     // Инициируем подключение к Telegram bot
     for {
-	bot, err = tgbotapi.NewBotAPI(botToken)
-	if err == nil {
-	    break
-	}
-	fmt.Println("Ошибка подключения к Telegram bot, повторная попытка через 5 секунд. Ошибка: ", err)
+	bot, err = tgbotapi.NewBotAPIWithClient(botToken, httpClient)
+	if err == nil { break }
+	fmt.Println("Ошибка подключения к Telegram bot, повторная попытка через 5 секунд. Ошибка:", err)
 	time.Sleep(5 * time.Second)
     }
+
     updateConfig := tgbotapi.NewUpdate(0)
     updateConfig.Timeout = 60
-    updates, _ := bot.GetUpdatesChan(updateConfig)
+
+    updates, err := bot.GetUpdatesChan(updateConfig)
+    if err != nil {
+	fmt.Println("Ошибка запуска polling:", err)
+	return
+    }
 
     // Запуск горутины для обработки сообщений от Telegram Bot
     go func() {
