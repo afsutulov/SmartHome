@@ -64,7 +64,7 @@ Available options:
 ## Build
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/SmartHome.git
+git clone https://github.com/afsutulov/SmartHome.git
 cd SmartHome
 go mod tidy
 go build -o SmartHome .
