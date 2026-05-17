@@ -13,7 +13,7 @@ SmartHome keeps application logic in Go and keeps devices, Telegram menu, MQTT t
 - Telegram bot keyboard configured from JSON.
 - Devices, groups, actions, events and schedules configured without recompiling.
 - Runtime state file separate from configuration.
-- Optional video monitoring trigger file.
+- Optional video monitoring trigger file (for https://github.com/afsutulov/VideoControl).
 - Optional Telegram SOCKS5 proxy.
 - Systemd-friendly service mode.
 
