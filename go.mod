@@ -1,11 +1,11 @@
-module SmartHome2
+module SmartHome
 
-go 1.24.0
+go 1.23.0
 
 require (
 	github.com/eclipse/paho.mqtt.golang v1.5.0
 	github.com/go-telegram-bot-api/telegram-bot-api v4.6.4+incompatible
-	golang.org/x/net v0.27.0
+	golang.org/x/net v0.38.0
 )
 
 require (

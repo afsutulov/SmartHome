@@ -1,0 +1,10 @@
+SmartHome
+*.log
+*.out
+*.test
+.env
+.DS_Store
+.idea/
+.vscode/
+configs/*.local.json
+configs/*.local.conf

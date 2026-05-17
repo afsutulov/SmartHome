@@ -1,0 +1,19 @@
+[Unit]
+Description=SmartHome MQTT controller
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/SmartHome --run --config /etc/smarthome.conf
+Restart=on-failure
+RestartSec=5s
+User=smarthome
+Group=smarthome
+WorkingDirectory=/var/lib/smarthome
+
+# Create these paths manually or via tmpfiles/install script if your distribution requires it.
+ReadWritePaths=/var/lib/smarthome /var/log/smarthome
+
+[Install]
+WantedBy=multi-user.target

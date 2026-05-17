@@ -1,0 +1,310 @@
+{
+  "telegram": {
+    "token": "1234567890:REPLACE_WITH_TELEGRAM_BOT_TOKEN",
+    "welcome_message": "Welcome to SmartHome!",
+    "poll_timeout_sec": 60,
+    "http_timeout_sec": 70,
+    "allowed_users": [
+      {
+        "id": 111111111,
+        "video_monitoring_enabled": false
+      }
+    ],
+    "proxy": {
+      "enabled": false,
+      "type": "none",
+      "address": "",
+      "username": "",
+      "password": "",
+      "secret": ""
+    }
+  },
+  "mqtt": {
+    "server": "tcp://127.0.0.1:1883",
+    "login": "",
+    "password": "",
+    "client_id": "SmartHome",
+    "qos": 1,
+    "retained": false,
+    "base_topics": [
+      "zigbee2mqtt",
+      "yandex"
+    ],
+    "subscribe_to": []
+  },
+  "storage": {
+    "state_file": "/var/lib/smarthome/state.json"
+  },
+  "logging": {
+    "level": "info",
+    "file": "/var/log/smarthome/smarthome.log",
+    "to_console": true
+  },
+  "labels": {
+    "off": "OFF",
+    "on": "ON",
+    "yes": "YES",
+    "no": "NO",
+    "unknown_command": "Unknown command!",
+    "datetime_format": "02.01.06 15:04",
+    "short_datetime_format": "02.01 15:04"
+  },
+  "video_monitoring": {
+    "enabled": false,
+    "lock_file": "/var/lib/smarthome/video.save",
+    "check_interval": "1s",
+    "delete_lock_file": true
+  },
+  "devices": [
+    {
+      "id": "living_room_light",
+      "name": "Living room light",
+      "type": "switch",
+      "zigbee_id": "0x00124b0024abcdef",
+      "yandex_id": "LivingRoomLight01",
+      "initial": {
+        "state": false
+      },
+      "actions": {
+        "on": {
+          "title": "ON",
+          "set_state": true,
+          "publishes": [
+            {
+              "topic": "{{index .BaseTopic 0}}/{{.Device.ZigbeeID}}/set",
+              "payload": {
+                "state": "ON"
+              }
+            },
+            {
+              "topic": "/{{index .BaseTopic 1}}/{{.Device.YandexID}}/state",
+              "payload": "true"
+            }
+          ]
+        },
+        "off": {
+          "title": "OFF",
+          "set_state": false,
+          "publishes": [
+            {
+              "topic": "{{index .BaseTopic 0}}/{{.Device.ZigbeeID}}/set",
+              "payload": {
+                "state": "OFF"
+              }
+            },
+            {
+              "topic": "/{{index .BaseTopic 1}}/{{.Device.YandexID}}/state",
+              "payload": "false"
+            }
+          ]
+        }
+      },
+      "reports": [
+        {
+          "name": "state",
+          "topic": "/{{index .BaseTopic 1}}/{{.Device.YandexID}}/state",
+          "expression": "eq(payload.state,'ON')"
+        }
+      ]
+    },
+    {
+      "id": "weather_sensor",
+      "name": "Weather sensor",
+      "type": "sensor",
+      "zigbee_id": "0x00158d0000000001",
+      "yandex_id": "Weather01",
+      "initial": {
+        "temperature": 0,
+        "humidity": 0,
+        "pressure": 0,
+        "battery": 0
+      },
+      "reports": [
+        {
+          "name": "temperature",
+          "topic": "/{{index .BaseTopic 1}}/{{.Device.YandexID}}/temperature",
+          "expression": "payload.temperature"
+        },
+        {
+          "name": "humidity",
+          "topic": "/{{index .BaseTopic 1}}/{{.Device.YandexID}}/humidity",
+          "expression": "payload.humidity"
+        },
+        {
+          "name": "pressure",
+          "topic": "/{{index .BaseTopic 1}}/{{.Device.YandexID}}/pressure",
+          "expression": "pressure_mmhg(payload.pressure)"
+        }
+      ]
+    },
+    {
+      "id": "water_leak_kitchen",
+      "name": "Kitchen leak sensor",
+      "type": "alarm",
+      "zigbee_id": "0x00158d0000000002",
+      "initial": {
+        "water_leak": false,
+        "battery": 0
+      }
+    },
+    {
+      "id": "video_control",
+      "name": "Video monitoring",
+      "type": "virtual",
+      "initial": {
+        "state": false
+      },
+      "actions": {
+        "on": {
+          "title": "ON",
+          "set_user_video": true
+        },
+        "off": {
+          "title": "OFF",
+          "set_user_video": false
+        }
+      }
+    }
+  ],
+  "command_integrations": [
+    {
+      "id": "yandex",
+      "enabled": true,
+      "topics": [
+        "/{{index .BaseTopic 1}}/{{.Device.YandexID}}",
+        "{{index .BaseTopic 1}}/{{.Device.YandexID}}"
+      ],
+      "action_on": "on",
+      "action_off": "off",
+      "payload_on": [
+        "true",
+        "on",
+        "1"
+      ],
+      "payload_off": [
+        "false",
+        "off",
+        "0"
+      ],
+      "force": true
+    }
+  ],
+  "groups": [
+    {
+      "id": "all_lights",
+      "name": "All lights",
+      "members": [
+        "living_room_light"
+      ]
+    },
+    {
+      "id": "leak_alarm",
+      "name": "Leak alarm",
+      "members": [
+        "water_leak_kitchen"
+      ],
+      "actions": {
+        "trigger": {
+          "title": "TRIGGERED",
+          "run_actions": [
+            "living_room_light.off"
+          ]
+        }
+      }
+    }
+  ],
+  "menu": {
+    "start_command": "/start",
+    "button_width": 20,
+    "rows": [
+      [
+        {
+          "text": "Smart home status",
+          "builtin": "status"
+        }
+      ],
+      [
+        {
+          "text": "Leaks",
+          "builtin": "alarms"
+        },
+        {
+          "text": "Battery level",
+          "builtin": "batteries"
+        }
+      ],
+      [
+        {
+          "device_id": "living_room_light",
+          "action": "off"
+        },
+        {
+          "device_id": "living_room_light",
+          "action": "on"
+        }
+      ],
+      [
+        {
+          "device_id": "video_control",
+          "action": "off"
+        },
+        {
+          "device_id": "video_control",
+          "action": "on"
+        }
+      ]
+    ]
+  },
+  "events": [
+    {
+      "id": "living_room_light_state",
+      "on_topic": "{{index .BaseTopic 0}}/{{.Device.ZigbeeID}}",
+      "device_id": "living_room_light",
+      "updates": {
+        "state": "eq(payload.state,'ON')"
+      }
+    },
+    {
+      "id": "weather_update",
+      "on_topic": "{{index .BaseTopic 0}}/{{.Device.ZigbeeID}}",
+      "device_id": "weather_sensor",
+      "updates": {
+        "temperature": "payload.temperature",
+        "humidity": "payload.humidity",
+        "pressure": "pressure_mmhg(payload.pressure)",
+        "battery": "payload.battery"
+      }
+    },
+    {
+      "id": "water_leak_kitchen_update",
+      "on_topic": "{{index .BaseTopic 0}}/{{.Device.ZigbeeID}}",
+      "device_id": "water_leak_kitchen",
+      "updates": {
+        "water_leak": "payload.water_leak",
+        "battery": "payload.battery"
+      }
+    },
+    {
+      "id": "water_leak_kitchen_alarm",
+      "on_topic": "{{index .BaseTopic 0}}/{{.Device.ZigbeeID}}",
+      "device_id": "water_leak_kitchen",
+      "when": {
+        "water_leak": true
+      },
+      "actions": [
+        "leak_alarm.trigger"
+      ],
+      "notify": {
+        "users": "all",
+        "text": "Water leak detected in kitchen!"
+      }
+    }
+  ],
+  "schedules": [
+    {
+      "id": "light_off_at_night",
+      "at": "23:30",
+      "action": "living_room_light.off"
+    }
+  ]
+}

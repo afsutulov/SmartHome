@@ -1,0 +1,159 @@
+// SmartHome configuration example.
+// Copy this file to /etc/smarthome.conf and remove comments, or use
+// configs/smarthome.conf.example.json as a valid JSON starting point.
+{
+  // Telegram bot settings.
+  "telegram": {
+    // Bot token from @BotFather.
+    "token": "1234567890:REPLACE_WITH_TELEGRAM_BOT_TOKEN",
+    // Message shown after /start.
+    "welcome_message": "Welcome to SmartHome!",
+    // Telegram long-poll timeout in seconds.
+    "poll_timeout_sec": 60,
+    // HTTP client timeout for Telegram API.
+    "http_timeout_sec": 70,
+    // Telegram user IDs allowed to use the bot.
+    "allowed_users": [
+      { "id": 111111111, "video_monitoring_enabled": false }
+    ],
+    // Optional proxy for Telegram API. Use type "none" or enabled=false for direct connection.
+    // Supported type in HTTP client: socks5. MTProxy requires a gateway because Bot API uses HTTPS.
+    "proxy": {
+      "enabled": false,
+      "type": "none",
+      "address": "",
+      "username": "",
+      "password": "",
+      "secret": ""
+    }
+  },
+
+  // MQTT broker settings.
+  "mqtt": {
+    "server": "tcp://127.0.0.1:1883",
+    "login": "",
+    "password": "",
+    "client_id": "SmartHome",
+    "qos": 1,
+    "retained": false,
+    // Base topic 0 is used for zigbee2mqtt, base topic 1 for yandex2mqtt in this example.
+    "base_topics": ["zigbee2mqtt", "yandex"],
+    // Extra topics to subscribe to, if needed.
+    "subscribe_to": []
+  },
+
+  // Runtime state file. This is NOT the configuration file.
+  "storage": {
+    "state_file": "/var/lib/smarthome/state.json"
+  },
+
+  // Logging settings.
+  "logging": {
+    "level": "info",              // debug, info, warn, error
+    "file": "/var/log/smarthome/smarthome.log",
+    "to_console": true
+  },
+
+  // Labels shown in Telegram messages.
+  "labels": {
+    "off": "OFF",
+    "on": "ON",
+    "yes": "YES",
+    "no": "NO",
+    "unknown_command": "Unknown command!",
+    "datetime_format": "02.01.06 15:04",
+    "short_datetime_format": "02.01 15:04"
+  },
+
+  // Optional video monitor. SmartHome watches lock_file; when it appears, users with
+  // video_monitoring_enabled=true receive the referenced video.
+  "video_monitoring": {
+    "enabled": false,
+    "lock_file": "/var/lib/smarthome/video.save",
+    "check_interval": "1s",
+    "delete_lock_file": true
+  },
+
+  // Devices are the core of the configuration. Add/remove/rename devices here.
+  "devices": [
+    {
+      "id": "living_room_light",              // Internal stable ID used by menu/events/groups.
+      "name": "Living room light",            // Human-readable name shown in Telegram.
+      "type": "switch",                       // switch, sensor, alarm, virtual.
+      "zigbee_id": "0x00124b0024abcdef",      // zigbee2mqtt friendly_name or IEEE address.
+      "yandex_id": "LivingRoomLight01",       // yandex2mqtt device ID.
+      "initial": { "state": false },          // Default runtime state before first MQTT update.
+      "actions": {
+        "on": {
+          "title": "ON",
+          "set_state": true,
+          "publishes": [
+            { "topic": "{{index .BaseTopic 0}}/{{.Device.ZigbeeID}}/set", "payload": { "state": "ON" } },
+            { "topic": "/{{index .BaseTopic 1}}/{{.Device.YandexID}}/state", "payload": "true" }
+          ]
+        },
+        "off": {
+          "title": "OFF",
+          "set_state": false,
+          "publishes": [
+            { "topic": "{{index .BaseTopic 0}}/{{.Device.ZigbeeID}}/set", "payload": { "state": "OFF" } },
+            { "topic": "/{{index .BaseTopic 1}}/{{.Device.YandexID}}/state", "payload": "false" }
+          ]
+        }
+      },
+      // Reports publish current device state to external systems such as yandex2mqtt.
+      "reports": [
+        { "name": "state", "topic": "/{{index .BaseTopic 1}}/{{.Device.YandexID}}/state", "expression": "eq(payload.state,'ON')" }
+      ]
+    }
+  ],
+
+  // External MQTT command integrations. yandex2mqtt sends commands to /yandex/<id>
+  // and expects current status on /yandex/<id>/state.
+  "command_integrations": [
+    {
+      "id": "yandex",
+      "enabled": true,
+      "topics": [
+        "/{{index .BaseTopic 1}}/{{.Device.YandexID}}",
+        "{{index .BaseTopic 1}}/{{.Device.YandexID}}"
+      ],
+      "action_on": "on",
+      "action_off": "off",
+      "payload_on": ["true", "on", "1"],
+      "payload_off": ["false", "off", "0"],
+      "force": true
+    }
+  ],
+
+  // Groups let one action control many devices.
+  "groups": [
+    { "id": "all_lights", "name": "All lights", "members": ["living_room_light"] }
+  ],
+
+  // Telegram keyboard. Builtins: status, alarms, batteries.
+  "menu": {
+    "start_command": "/start",
+    "button_width": 20,
+    "rows": [
+      [{ "text": "Smart home status", "builtin": "status" }],
+      [{ "text": "Battery level", "builtin": "batteries" }],
+      [{ "device_id": "living_room_light", "action": "off" }, { "device_id": "living_room_light", "action": "on" }]
+    ]
+  },
+
+  // Events update runtime state and optionally run actions or send notifications.
+  "events": [
+    {
+      "id": "living_room_light_state",
+      "on_topic": "{{index .BaseTopic 0}}/{{.Device.ZigbeeID}}",
+      "device_id": "living_room_light",
+      "updates": { "state": "eq(payload.state,'ON')" }
+    }
+  ],
+
+  // Simple daily schedules in local server time.
+  "schedules": [
+    { "id": "light_off_at_night", "at": "23:30", "action": "living_room_light.off" }
+  ]
+}
