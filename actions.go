@@ -215,12 +215,19 @@ func (a *App) runActionLocked(d DeviceConfig, act ActionConfig, chatID int64, sk
 			return "Действие заблокировано: " + html.EscapeString(reason), false, false, 0
 		}
 	}
-	if act.SetUserVideo != nil && chatID != 0 {
-		a.setUserVideo(chatID, *act.SetUserVideo)
+	if act.SetUserVideo != nil && (chatID != 0 || act.VideoUserID != 0) {
+		videoUserID := chatID
+		if act.VideoUserID != 0 {
+			videoUserID = act.VideoUserID
+		}
+		a.setUserVideo(videoUserID, *act.SetUserVideo)
 		return fmt.Sprintf("%s: <b>%s</b>", html.EscapeString(d.Name), a.boolLabel(*act.SetUserVideo)), false, true, 0
 	}
 	if !force && !act.Force && act.SetState != nil && a.deviceStateEquals(d.ID, "state", *act.SetState) {
 		return fmt.Sprintf("%s уже <b>%s</b>", html.EscapeString(d.Name), a.boolLabel(*act.SetState)), false, true, 0
+	}
+	if act.SetAllUsersVideo != nil {
+		a.setAllUsersVideo(*act.SetAllUsersVideo)
 	}
 	logInfo("device action: device=%s name=%q action_title=%q", d.ID, d.Name, act.Title)
 	previous := a.getDeviceState(d.ID)
@@ -267,6 +274,9 @@ func (a *App) runGroupAction(g GroupConfig, act ActionConfig, chatID int64, tr *
 		}
 	}
 	child := &actionTrace{}
+	if act.SetAllUsersVideo != nil {
+		a.setAllUsersVideo(*act.SetAllUsersVideo)
+	}
 	delivered := true
 	for _, next := range act.RunActions {
 		if !a.runNamedActionTraced(next, chatID, child) {

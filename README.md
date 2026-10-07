@@ -1402,3 +1402,11 @@ Example field inside an action:
 ```
 
 Preserve your current configuration, action chains, and state file when upgrading. See [NOTIFICATIONS.ru.md](NOTIFICATIONS.ru.md) for the Russian away-mode configuration guide. Telegram users must have started the bot and must not have blocked it.
+
+## Video control for all users
+
+Set `set_all_users_video` to `true` or `false` in a device action or an explicitly configured group action to switch video delivery for every current `telegram.allowed_users` recipient. No individual user IDs or caller identity are needed. For away-mode integration, add it to `home_mode.actions.on` and `home_mode.actions.off`, keeping existing action chains and notifications.
+
+`python3 scripts/enable-away-video.py CURRENT_CONFIG NEW_CONFIG` creates a private copy with these settings and migrates recognized generated per-user commands from earlier configurations. Unrelated settings and externally referenced definitions are preserved. Validate the new file before installing it with permissions readable by your service account. See [AWAY_VIDEO.ru.md](AWAY_VIDEO.ru.md) for setup.
+
+Switching happens at the start of execution, before device commands. Later failures do not roll it back; skipped already-executed actions do not switch again. This controls recipient settings, not camera power or recording. Individual `set_user_video` and `video_user_id` actions remain supported; do not combine personal and all-user settings in the same action.

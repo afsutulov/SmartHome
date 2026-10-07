@@ -116,14 +116,16 @@ type DeviceConfig struct {
 }
 
 type ActionConfig struct {
-	Title        string           `json:"title"`
-	SetState     *bool            `json:"set_state,omitempty"`
-	Force        bool             `json:"force,omitempty"`
-	Publishes    []PublishConfig  `json:"publishes"`
-	RunActions   []string         `json:"run_actions"`
-	SetUserVideo *bool            `json:"set_user_video,omitempty"`
-	BlockWhen    []StateCondition `json:"block_when,omitempty"`
-	Notify       *NotifyConfig    `json:"notify,omitempty"`
+	Title            string           `json:"title"`
+	SetState         *bool            `json:"set_state,omitempty"`
+	Force            bool             `json:"force,omitempty"`
+	Publishes        []PublishConfig  `json:"publishes"`
+	RunActions       []string         `json:"run_actions"`
+	SetUserVideo     *bool            `json:"set_user_video,omitempty"`
+	VideoUserID      int64            `json:"video_user_id,omitempty"`
+	SetAllUsersVideo *bool            `json:"set_all_users_video,omitempty"`
+	BlockWhen        []StateCondition `json:"block_when,omitempty"`
+	Notify           *NotifyConfig    `json:"notify,omitempty"`
 }
 
 type StateCondition struct {

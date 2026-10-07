@@ -172,6 +172,27 @@ func ValidateConfig(cfg Config) error {
 	graph := map[string][]string{}
 	guardTypes := map[string]any{}
 	checkAction := func(ref string, act ActionConfig) error {
+		if act.SetAllUsersVideo != nil && (act.SetUserVideo != nil || act.VideoUserID != 0) {
+			return fmt.Errorf("action %s: set_all_users_video cannot be combined with personal video settings", ref)
+		}
+		if act.VideoUserID != 0 {
+			if _, isGroup := groups[strings.SplitN(ref, ".", 2)[0]]; isGroup {
+				return fmt.Errorf("action %s: video_user_id is supported in device actions only", ref)
+			}
+			if act.SetUserVideo == nil {
+				return fmt.Errorf("action %s: video_user_id requires set_user_video", ref)
+			}
+			allowed := false
+			for _, user := range cfg.Telegram.AllowedUsers {
+				if user.ID > 0 && user.ID == act.VideoUserID {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return fmt.Errorf("action %s: video_user_id must reference a positive telegram.allowed_users id", ref)
+			}
+		}
 		if act.Notify != nil {
 			if act.Notify.Users != "" && act.Notify.Users != "all" && act.Notify.Users != "video_enabled" {
 				return fmt.Errorf("action %s: unknown notify.users", ref)

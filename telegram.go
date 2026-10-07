@@ -373,6 +373,19 @@ func (a *App) setUserVideo(userID int64, enabled bool) {
 	a.SaveState()
 }
 
+// Switch all currently allowed recipients together, then persist once.
+// Historical state entries for removed users are not changed.
+func (a *App) setAllUsersVideo(enabled bool) {
+	a.stateMu.Lock()
+	for _, user := range a.cfg.Telegram.AllowedUsers {
+		state := a.state.Users[fmt.Sprint(user.ID)]
+		state.VideoMonitoringEnabled = enabled
+		a.state.Users[fmt.Sprint(user.ID)] = state
+	}
+	a.stateMu.Unlock()
+	a.SaveState()
+}
+
 // boolLabel переводит bool-значение в пользовательскую метку ВКЛ/ВЫКЛ из конфигурации (HTML-безопасно).
 func (a *App) boolLabel(v bool) string {
 	if v {
