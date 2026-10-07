@@ -172,6 +172,14 @@ func ValidateConfig(cfg Config) error {
 	graph := map[string][]string{}
 	guardTypes := map[string]any{}
 	checkAction := func(ref string, act ActionConfig) error {
+		if act.Notify != nil {
+			if act.Notify.Users != "" && act.Notify.Users != "all" && act.Notify.Users != "video_enabled" {
+				return fmt.Errorf("action %s: unknown notify.users", ref)
+			}
+			if strings.TrimSpace(act.Notify.Text) == "" {
+				return fmt.Errorf("action %s: notify.text must not be empty", ref)
+			}
+		}
 		for _, guard := range act.BlockWhen {
 			if _, ok := devices[guard.DeviceID]; !ok {
 				return fmt.Errorf("action %s: unknown block_when device %q", ref, guard.DeviceID)

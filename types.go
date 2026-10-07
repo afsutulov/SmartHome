@@ -123,6 +123,7 @@ type ActionConfig struct {
 	RunActions   []string         `json:"run_actions"`
 	SetUserVideo *bool            `json:"set_user_video,omitempty"`
 	BlockWhen    []StateCondition `json:"block_when,omitempty"`
+	Notify       *NotifyConfig    `json:"notify,omitempty"`
 }
 
 type StateCondition struct {

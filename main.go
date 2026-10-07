@@ -12,7 +12,7 @@ import (
 
 const (
 	appName        = "SmartHome"
-	appVersion     = "1.0.7"
+	appVersion     = "1.0.8"
 	appDescription = "Lightweight MQTT smart home controller for Telegram, zigbee2mqtt and yandex2mqtt."
 )
 

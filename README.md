@@ -65,10 +65,9 @@ Supplied binary targets:
 
 | Platform | Architecture | File |
 | --- | --- | --- |
-| Linux | x86-64 / AMD64 | `bin/smarthome-1.0.7-linux-amd64.tar.gz` |
-| Linux | ARM64 / AArch64 | `bin/smarthome-1.0.7-linux-arm64.tar.gz` |
-| MacOS | ARM64 / AArch64 | `bin/smarthome-1.0.7-macos-arm64.zip` |
-| Windows | x86-64 / AMD64 | `bin/smarthome-1.0.7-windows-amd64.zip` |
+| Linux | x86-64 / AMD64 | `bin/linux-amd64/SmartHome` |
+| Linux | ARM64 / AArch64 | `bin/linux-arm64/SmartHome` |
+| Windows | x86-64 / AMD64 | `bin/windows-amd64/SmartHome.exe` |
 
 ARMv7 is not included in the release script. Go is needed to build sources, not to run a supplied binary. The module declares Go 1.25 and requests the Go 1.26.8 toolchain; automatic toolchain selection may download it during the first build.
 
@@ -1388,3 +1387,18 @@ sha256sum -c SHA256SUMS
 The script uses `CGO_ENABLED=0` for Linux AMD64/ARM64 and Windows AMD64. `GO_BINARY` selects the Go executable for that script.
 
 Distributed under the [MIT license](LICENSE).
+
+## Action completion notifications
+
+Device actions and explicitly configured group actions accept an optional `notify` object with `users` (`all` or `video_enabled`) and a `text` template. Notifications are queued after the complete action chain finishes, regardless of whether the action originated from Telegram, an MQTT button event, or another supported entry point. `.ActionsOK` distinguishes successful command execution from a failed or partially blocked chain; it is not proof of physical actuation. Skipped "already executed" actions do not create another broadcast. MQTT event rules do not need modification.
+
+Example field inside an action:
+
+```json
+"notify": {
+  "users": "all",
+  "text": "{{if .ActionsOK}}Away mode enabled.{{else}}Away mode could not be fully enabled. Check device states and the SmartHome log.{{end}}"
+}
+```
+
+Preserve your current configuration, action chains, and state file when upgrading. See [NOTIFICATIONS.ru.md](NOTIFICATIONS.ru.md) for the Russian away-mode configuration guide. Telegram users must have started the bot and must not have blocked it.

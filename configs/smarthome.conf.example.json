@@ -1,6 +1,6 @@
 {
   "telegram": {
-    "token": "1234567890:REPLACE_WITH_TELEGRAM_BOT_TOKEN",
+    "token": "CHANGE_ME_TELEGRAM_BOT_TOKEN",
     "welcome_message": "Welcome to SmartHome!",
     "poll_timeout_sec": 60,
     "http_timeout_sec": 70,
@@ -22,7 +22,7 @@
   "mqtt": {
     "server": "tcp://127.0.0.1:1883",
     "login": "",
-    "password": "",
+    "password": "CHANGE_ME_MQTT_PASSWORD",
     "client_id": "SmartHome",
     "qos": 1,
     "retained": false,

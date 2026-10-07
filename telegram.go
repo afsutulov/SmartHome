@@ -341,7 +341,11 @@ func formatUnix(v any, layout string) string {
 
 // Notify отправляет уведомление Telegram-пользователям по правилу события.
 func (a *App) Notify(n *NotifyConfig, deviceID string, payload map[string]any, raw string, actionsOK bool) {
-	text := render(n.Text, map[string]any{"Device": a.devices[deviceID], "BaseTopic": a.cfg.MQTT.BaseTopics, "Payload": payload, "RawPayload": raw, "ActionsOK": actionsOK})
+	a.notifyContext(n, map[string]any{"Device": a.devices[deviceID], "BaseTopic": a.cfg.MQTT.BaseTopics, "Payload": payload, "RawPayload": raw, "ActionsOK": actionsOK})
+}
+
+func (a *App) notifyContext(n *NotifyConfig, context map[string]any) {
+	text := render(n.Text, context)
 	for _, user := range a.cfg.Telegram.AllowedUsers {
 		if n.Users == "video_enabled" && !a.userVideoEnabled(user.ID) {
 			continue

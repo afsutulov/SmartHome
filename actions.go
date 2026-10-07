@@ -183,6 +183,11 @@ func (a *App) runAction(d DeviceConfig, act ActionConfig, chatID int64, skipInte
 	if executeNext && !delivered {
 		text = chainFailureText(d.Name, child)
 	}
+	// Notify only an executed action, after the whole chain has finished.
+	// Enqueueing Telegram messages does not wait for Telegram or hold MQTT up.
+	if executeNext && act.Notify != nil {
+		a.Notify(act.Notify, d.ID, nil, "", delivered)
+	}
 	return text, delivered
 }
 
@@ -277,6 +282,9 @@ func (a *App) runGroupAction(g GroupConfig, act ActionConfig, chatID int64, tr *
 	}
 	tr.merge(child)
 	a.SaveState()
+	if act.Notify != nil {
+		a.notifyContext(act.Notify, map[string]any{"Group": g, "BaseTopic": a.cfg.MQTT.BaseTopics, "ActionsOK": delivered})
+	}
 	if !delivered {
 		return chainFailureText(g.Name, child), false
 	}
