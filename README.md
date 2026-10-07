@@ -65,9 +65,9 @@ Supplied binary targets:
 
 | Platform | Architecture | File |
 | --- | --- | --- |
-| Linux | x86-64 / AMD64 | `bin/linux-amd64/SmartHome` |
-| Linux | ARM64 / AArch64 | `bin/linux-arm64/SmartHome` |
-| Windows | x86-64 / AMD64 | `bin/windows-amd64/SmartHome.exe` |
+| Linux | x86-64 / AMD64 | `bin/smarthome-1.0.7-linux-amd64.tar.gz` |
+| Linux | ARM64 / AArch64 | `bin/smarthome-1.0.7-linux-arm64.tar.gz` |
+| Windows | x86-64 / AMD64 | `bin/smarthome-1.0.7-windows-amd64.zip` |
 
 ARMv7 is not included in the release script. Go is needed to build sources, not to run a supplied binary. The module declares Go 1.25 and requests the Go 1.26.8 toolchain; automatic toolchain selection may download it during the first build.
 
