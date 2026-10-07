@@ -65,9 +65,10 @@ SmartHome подключается к MQTT и получает обновлен�
 
 | Платформа | Архитектура | Файл |
 | --- | --- | --- |
-| Linux | x86-64 / AMD64 | `bin/linux-amd64/SmartHome` |
-| Linux | ARM64 / AArch64 | `bin/linux-arm64/SmartHome` |
-| Windows | x86-64 / AMD64 | `bin/windows-amd64/SmartHome.exe` |
+| Linux | x86-64 / AMD64 | `bin/smarthome-1.0.7-linux-amd64.tar.gz` |
+| Linux | ARM64 / AArch64 | `bin/smarthome-1.0.7-linux-arm64.tar.gz` |
+| MacOS | ARM64 / AArch64 | `bin/smarthome-1.0.7-macos-arm64.zip` |
+| Windows | x86-64 / AMD64 | `bin/smarthome-1.0.7-windows-amd64.zip` |
 
 ARMv7 не включён в скрипт сборки поставки. Go нужен для сборки исходников, но не для запуска готового бинарника. В модуле указана минимальная версия Go 1.25 и запрошен toolchain Go 1.26.8; при автоматическом выборе инструментария первая сборка может загрузить его.
 
