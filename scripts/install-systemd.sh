@@ -27,6 +27,10 @@ if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "Installed example config to ${CONFIG_PATH}. Edit it before starting the service."
 fi
 
+# Существующий конфиг может быть root:root/0600; сервису smarthome нужен доступ.
+chown root:smarthome "${CONFIG_PATH}"
+chmod 0640 "${CONFIG_PATH}"
+
 install -m 0644 systemd/smarthome.service "${SERVICE_PATH}"
 systemctl daemon-reload
 systemctl enable smarthome

@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -22,6 +24,9 @@ func loadConfig(path string) (Config, error) {
 	if err := dec.Decode(&cfg); err != nil {
 		return Config{}, err
 	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		return Config{}, errors.New("config must contain exactly one JSON object")
+	}
 	if cfg.Telegram.Token == "" {
 		return cfg, errors.New("telegram.token is required")
 	}
@@ -30,6 +35,14 @@ func loadConfig(path string) (Config, error) {
 	}
 	if cfg.Storage.StateFile == "" {
 		cfg.Storage.StateFile = "/var/lib/smarthome/state.json"
+	}
+	for _, target := range []string{cfg.Storage.StateFile, cfg.Logging.File} {
+		if target != "" && pathsAlias(path, target) {
+			return cfg, errors.New("storage/logging file must not overwrite config")
+		}
+	}
+	if cfg.Logging.File != "" && pathsAlias(cfg.Storage.StateFile, cfg.Logging.File) {
+		return cfg, errors.New("storage.state_file and logging.file must differ")
 	}
 	if cfg.Logging.Level == "" {
 		cfg.Logging.Level = "info"
@@ -92,6 +105,31 @@ func loadConfig(path string) (Config, error) {
 
 // ValidateConfig проверяет ссылки в конфигурации: меню, устройства, группы, расписания и действия.
 func ValidateConfig(cfg Config) error {
+	switch strings.ToLower(cfg.Logging.Level) {
+	case "", "debug", "info", "warn", "warning", "error":
+	default:
+		return fmt.Errorf("unknown logging.level %q", cfg.Logging.Level)
+	}
+	if cfg.MQTT.QOS > 2 {
+		return errors.New("mqtt.qos must be 0, 1 or 2")
+	}
+	if cfg.Telegram.PollTimeoutSec < 0 || cfg.Telegram.HTTPTimeoutSec <= cfg.Telegram.PollTimeoutSec {
+		return errors.New("telegram.http_timeout_sec must exceed nonnegative poll_timeout_sec")
+	}
+	if cfg.VideoMonitoring.CheckInterval.Duration <= 0 {
+		return errors.New("video_monitoring.check_interval must be positive")
+	}
+	if cfg.VideoMonitoring.Enabled && strings.TrimSpace(cfg.VideoMonitoring.LockFile) == "" {
+		return errors.New("video_monitoring.lock_file is required when video_monitoring.enabled is true")
+	}
+	if pc := cfg.Telegram.Proxy; pc.Enabled && !strings.EqualFold(pc.Type, "none") {
+		if !strings.EqualFold(pc.Type, "socks5") {
+			return fmt.Errorf("telegram.proxy.type %q is not supported (use \"socks5\" or \"none\")", pc.Type)
+		}
+		if strings.TrimSpace(pc.Address) == "" {
+			return errors.New("telegram.proxy.address is required for socks5 proxy")
+		}
+	}
 	devices := map[string]DeviceConfig{}
 	groups := map[string]GroupConfig{}
 	for _, d := range cfg.Devices {
@@ -102,6 +140,16 @@ func ValidateConfig(cfg Config) error {
 			return fmt.Errorf("duplicate device id %q", d.ID)
 		}
 		devices[d.ID] = d
+		for _, r := range d.Reports {
+			if r.Expression == "" && r.Field == "" {
+				return fmt.Errorf("device %q: report %q needs expression or field", d.ID, r.Name)
+			}
+			if r.Expression != "" {
+				if err := validateExpression(r.Expression); err != nil {
+					return fmt.Errorf("device %q: report %q: %w", d.ID, r.Name, err)
+				}
+			}
+		}
 	}
 	for _, g := range cfg.Groups {
 		if g.ID == "" {
@@ -110,12 +158,103 @@ func ValidateConfig(cfg Config) error {
 		if _, exists := groups[g.ID]; exists {
 			return fmt.Errorf("duplicate group id %q", g.ID)
 		}
+		if _, exists := devices[g.ID]; exists {
+			return fmt.Errorf("group and device share id %q", g.ID)
+		}
 		for _, member := range g.Members {
 			if _, ok := devices[member]; !ok {
 				return fmt.Errorf("group %q references unknown device %q", g.ID, member)
 			}
 		}
 		groups[g.ID] = g
+	}
+	// Проверяем все цепочки, включая аварийные правила, а не только меню.
+	graph := map[string][]string{}
+	guardTypes := map[string]any{}
+	checkAction := func(ref string, act ActionConfig) error {
+		for _, guard := range act.BlockWhen {
+			if _, ok := devices[guard.DeviceID]; !ok {
+				return fmt.Errorf("action %s: unknown block_when device %q", ref, guard.DeviceID)
+			}
+			if strings.TrimSpace(guard.Field) == "" || guard.Value == nil {
+				return fmt.Errorf("action %s: block_when needs field and scalar value", ref)
+			}
+			switch guard.Value.(type) {
+			case bool, string, float64:
+			default:
+				return fmt.Errorf("action %s: block_when value must be bool, string or number", ref)
+			}
+			key := guard.DeviceID + "\x00" + guard.Field
+			if previous, exists := guardTypes[key]; exists && !sameGuardType(guard.Value, previous) {
+				return fmt.Errorf("action %s: incompatible block_when types for %s.%s", ref, guard.DeviceID, guard.Field)
+			}
+			guardTypes[key] = guard.Value
+		}
+		for _, next := range act.RunActions {
+			if err := validateNamedAction(next, devices, groups); err != nil {
+				return fmt.Errorf("action %s: %w", ref, err)
+			}
+		}
+		graph[ref] = act.RunActions
+		return nil
+	}
+	for _, d := range cfg.Devices {
+		for name, act := range d.Actions {
+			if err := checkAction(d.ID+"."+name, act); err != nil {
+				return err
+			}
+		}
+	}
+	for _, g := range cfg.Groups {
+		for name, act := range g.Actions {
+			if err := checkAction(g.ID+"."+name, act); err != nil {
+				return err
+			}
+		}
+	}
+	// Неявные действия групп также участвуют в проверке циклов.
+	for _, g := range cfg.Groups {
+		for _, d := range cfg.Devices {
+			for action := range d.Actions {
+				ref := g.ID + "." + action
+				if _, explicit := g.Actions[action]; !explicit {
+					for _, member := range g.Members {
+						graph[ref] = append(graph[ref], member+"."+action)
+					}
+				}
+			}
+		}
+	}
+	if err := validateActionGraph(graph); err != nil {
+		return err
+	}
+	eventIDs := map[string]bool{}
+	for _, ev := range cfg.Events {
+		if ev.ID == "" || eventIDs[ev.ID] {
+			return fmt.Errorf("event id empty or duplicated: %q", ev.ID)
+		}
+		eventIDs[ev.ID] = true
+		if ev.DeviceID != "" {
+			if _, ok := devices[ev.DeviceID]; !ok {
+				return fmt.Errorf("event %q: unknown device %q", ev.ID, ev.DeviceID)
+			}
+		}
+		if len(ev.Updates) > 0 && ev.DeviceID == "" {
+			return fmt.Errorf("event %q: updates require device_id", ev.ID)
+		}
+		for _, ref := range ev.Actions {
+			if err := validateNamedAction(ref, devices, groups); err != nil {
+				return fmt.Errorf("event %q: %w", ev.ID, err)
+			}
+		}
+		for field, expr := range ev.Updates {
+			if err := validateExpression(expr); err != nil {
+				return fmt.Errorf("event %q: updates.%s: %w", ev.ID, field, err)
+			}
+		}
+		if ev.Notify != nil && ev.Notify.Users != "all" && ev.Notify.Users != "video_enabled" && ev.Notify.Users != "" {
+			return fmt.Errorf("event %q: unknown notify.users", ev.ID)
+		}
 	}
 	for _, ci := range cfg.CommandIntegrations {
 		if !ci.Enabled {
@@ -135,10 +274,99 @@ func ValidateConfig(cfg Config) error {
 			}
 		}
 	}
+	scheduleIDs := map[string]bool{}
 	for _, s := range cfg.Schedules {
+		if s.ID == "" || scheduleIDs[s.ID] {
+			return fmt.Errorf("schedule id empty or duplicated: %q", s.ID)
+		}
+		scheduleIDs[s.ID] = true
+		if _, err := time.Parse("15:04", s.At); err != nil {
+			return fmt.Errorf("schedule %q: invalid at %q", s.ID, s.At)
+		}
 		if s.Action != "" {
 			if err := validateNamedAction(s.Action, devices, groups); err != nil {
 				return fmt.Errorf("schedule %q: %w", s.ID, err)
+			}
+		}
+	}
+	return validateConfigTemplates(cfg, devices)
+}
+
+func pathsAlias(first, second string) bool {
+	a, _ := filepath.Abs(first)
+	b, _ := filepath.Abs(second)
+	if a == b {
+		return true
+	}
+	aInfo, aErr := os.Stat(first)
+	bInfo, bErr := os.Stat(second)
+	return aErr == nil && bErr == nil && os.SameFile(aInfo, bInfo)
+}
+
+// Топики должны полностью рендериться при запуске. Payload/уведомление может ссылаться
+// на динамические поля: ошибки их рендеринга журналируются при сообщении.
+func validateConfigTemplates(cfg Config, devices map[string]DeviceConfig) error {
+	check := func(t string, data map[string]any) error {
+		if _, err := renderChecked(t, data); err != nil {
+			return fmt.Errorf("invalid topic template %q: %w", t, err)
+		}
+		return nil
+	}
+	base := map[string]any{"BaseTopic": cfg.MQTT.BaseTopics}
+	for _, topic := range cfg.MQTT.SubscribeTo {
+		if err := check(topic, base); err != nil {
+			return err
+		}
+	}
+	for _, d := range cfg.Devices {
+		ctx := map[string]any{"Device": d, "BaseTopic": cfg.MQTT.BaseTopics}
+		for _, topic := range d.Subscribe {
+			if err := check(topic, ctx); err != nil {
+				return err
+			}
+		}
+		for _, act := range d.Actions {
+			for _, p := range act.Publishes {
+				if err := check(p.Topic, ctx); err != nil {
+					return err
+				}
+			}
+		}
+		for _, r := range d.Reports {
+			if err := check(r.Topic, ctx); err != nil {
+				return err
+			}
+		}
+		for _, ci := range cfg.CommandIntegrations {
+			if ci.Enabled {
+				for _, topic := range commandIntegrationTopics(ci) {
+					if topicTemplateApplies(d, topic) {
+						if err := check(topic, ctx); err != nil {
+							return err
+						}
+					}
+				}
+			}
+		}
+	}
+	for _, g := range cfg.Groups {
+		ctx := map[string]any{"Group": g, "BaseTopic": cfg.MQTT.BaseTopics}
+		for _, act := range g.Actions {
+			for _, p := range act.Publishes {
+				if err := check(p.Topic, ctx); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	for _, ev := range cfg.Events {
+		ctx := map[string]any{"Device": devices[ev.DeviceID], "BaseTopic": cfg.MQTT.BaseTopics}
+		if err := check(ev.OnTopic, ctx); err != nil {
+			return err
+		}
+		for _, p := range ev.Publishes {
+			if err := check(p.Topic, ctx); err != nil {
+				return err
 			}
 		}
 	}
@@ -170,10 +398,10 @@ func validateMenuItem(item MenuItem, devices map[string]DeviceConfig, groups map
 		if !ok {
 			return fmt.Errorf("unknown group_id %q", item.GroupID)
 		}
-		if _, ok := g.Actions[item.Action]; !ok && item.Action == "" {
+		if item.Action == "" {
 			return fmt.Errorf("group %q action is empty", item.GroupID)
 		}
-		return nil
+		return validateNamedAction(g.ID+"."+item.Action, devices, groups)
 	}
 	return errors.New("item must contain builtin, device_id or group_id")
 }
@@ -192,9 +420,120 @@ func validateNamedAction(name string, devices map[string]DeviceConfig, groups ma
 	}
 	if g, ok := groups[parts[0]]; ok {
 		if _, ok := g.Actions[parts[1]]; !ok {
-			return fmt.Errorf("group %q has no action %q", parts[0], parts[1])
+			if len(g.Members) == 0 {
+				return fmt.Errorf("group %q has no action %q", parts[0], parts[1])
+			}
+			for _, id := range g.Members {
+				if _, ok := devices[id].Actions[parts[1]]; !ok {
+					return fmt.Errorf("group %q member %q has no action %q", g.ID, id, parts[1])
+				}
+			}
 		}
 		return nil
 	}
 	return fmt.Errorf("unknown action target %q", parts[0])
+}
+
+func validateActionGraph(graph map[string][]string) error {
+	status := map[string]int{}
+	var visit func(string) error
+	visit = func(ref string) error {
+		if status[ref] == 1 {
+			return fmt.Errorf("cyclic action chain at %q", ref)
+		}
+		if status[ref] == 2 {
+			return nil
+		}
+		status[ref] = 1
+		for _, next := range graph[ref] {
+			if err := visit(next); err != nil {
+				return err
+			}
+		}
+		status[ref] = 2
+		return nil
+	}
+	for ref := range graph {
+		if err := visit(ref); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateExpression проверяет выражение из updates/reports заранее, при запуске.
+// Раньше опечатка (например, "eq(payload.state 'ON')") молча возвращалась как строковая
+// константа и записывалась в состояние. Строки без признаков выражения (без скобок,
+// без "$" и без "payload") по-прежнему трактуются как константы.
+func validateExpression(expr string) error {
+	e := strings.TrimSpace(expr)
+	if e != expr {
+		return fmt.Errorf("expression %q has leading/trailing spaces", expr)
+	}
+	isExpression := looksLikeExpression(e)
+	if !isExpression {
+		return nil
+	}
+	if _, err := checkExpression(e); err != nil {
+		return fmt.Errorf("invalid expression %q: %w", expr, err)
+	}
+	return nil
+}
+
+// checkExpression разбирает выражение по тем же правилам, что evalExpression,
+// и сообщает, возвращает ли оно булево значение.
+func checkExpression(e string) (bool, error) {
+	field := func(s string) error {
+		s = strings.TrimSpace(s)
+		if !strings.HasPrefix(s, "payload.") || len(s) == len("payload.") || strings.ContainsAny(strings.TrimPrefix(s, "payload."), "(), \t\n\r\"'") {
+			return fmt.Errorf("expected payload.<field>, got %q", s)
+		}
+		return nil
+	}
+	if e == "$raw" {
+		return false, nil
+	}
+	if e == "$raw_bool" {
+		return true, nil
+	}
+	if strings.HasPrefix(e, "payload.") {
+		return false, field(e)
+	}
+	name, args, err := parseExpressionCall(e)
+	if err != nil {
+		return false, err
+	}
+	switch name {
+	case "eq", "ne":
+		if len(args) != 2 {
+			return false, fmt.Errorf("%s() needs two arguments", name)
+		}
+		if err := field(args[0]); err != nil {
+			return false, err
+		}
+		if _, err := expressionLiteral(args[1]); err != nil {
+			return false, err
+		}
+		return true, nil
+	case "and":
+		if len(args) < 2 {
+			return false, errors.New("and() needs at least two arguments")
+		}
+		for _, arg := range args {
+			isBool, err := checkExpression(strings.TrimSpace(arg))
+			if err != nil {
+				return false, err
+			}
+			if !isBool {
+				return false, fmt.Errorf("and() argument %q is not boolean", arg)
+			}
+		}
+		return true, nil
+	case "pressure_mmhg":
+		if len(args) != 1 {
+			return false, errors.New("pressure_mmhg() needs one argument")
+		}
+		return false, field(args[0])
+	}
+	return false, fmt.Errorf("unknown expression function %q", name)
 }

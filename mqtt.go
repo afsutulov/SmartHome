@@ -12,6 +12,7 @@ import (
 
 // ConnectMQTT создаёт MQTT-клиент, подключается к брокеру и настраивает обработчик входящих сообщений.
 func (a *App) ConnectMQTT() mqtt.Client {
+	a.mqttWorkerOnce.Do(func() { go a.runMQTTInbox() })
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(a.cfg.MQTT.Server)
 	opts.SetUsername(a.cfg.MQTT.Login)
@@ -20,161 +21,78 @@ func (a *App) ConnectMQTT() mqtt.Client {
 		a.cfg.MQTT.ClientID = "SmartHome"
 	}
 	opts.SetClientID(a.cfg.MQTT.ClientID)
-	opts.SetDefaultPublishHandler(a.OnMQTTMessage)
-	opts.SetKeepAlive(0)
-	opts.SetOrderMatters(false)
+	opts.SetDefaultPublishHandler(func(_ mqtt.Client, msg mqtt.Message) { a.enqueueMQTT(mqttTask{message: msg}) })
+	opts.SetKeepAlive(30 * time.Second)
+	// Короткий callback только помещает кадр в FIFO. Ожидание PUBACK внутри
+	// ordered callback блокировало бы маршрутизатор Paho; работа идёт отдельно.
+	opts.SetOrderMatters(true)
 	opts.SetAutoReconnect(true)
+	opts.SetConnectRetry(true)
+	opts.SetConnectRetryInterval(5 * time.Second)
+	opts.SetOnConnectHandler(func(client mqtt.Client) {
+		a.enqueueMQTT(mqttTask{reset: true})
+		a.subscribeMQTT(client)
+	})
 	opts.SetConnectionLostHandler(func(client mqtt.Client, err error) { logWarn("mqtt connection lost: %v", err) })
 	client := mqtt.NewClient(opts)
-	if token := client.Connect(); token.Wait() && token.Error() != nil {
+	a.mqtt = client
+	token := client.Connect()
+	if !token.WaitTimeout(10 * time.Second) {
+		// При SetConnectRetry(true) токен завершится только после успешного подключения.
+		logWarn("mqtt broker %s is not reachable yet, connecting in background", a.cfg.MQTT.Server)
+	} else if token.Error() != nil {
 		logError("mqtt connection error: %v", token.Error())
+	} else {
+		logInfo("mqtt connected: %s", a.cfg.MQTT.Server)
 	}
 	return client
 }
 
+func (a *App) enqueueMQTT(task mqttTask) bool {
+	select {
+	case a.mqttInbox <- task:
+		return true
+	default:
+		topic := "session reset"
+		if task.message != nil {
+			topic = task.message.Topic()
+		}
+		logError("MQTT incoming queue full; message lost: topic=%s capacity=%d", topic, cap(a.mqttInbox))
+		return false
+	}
+}
+
+func (a *App) runMQTTInbox() {
+	for task := range a.mqttInbox {
+		if task.reset {
+			a.eventMu.Lock()
+			a.eventActive = map[int]bool{}
+			a.reportedPayloads = map[string]map[string]any{}
+			a.eventMu.Unlock()
+			continue
+		}
+		a.OnMQTTMessage(a.mqtt, task.message)
+	}
+}
+
 // SubscribeMQTT подписывает MQTT-клиент на топики из конфигурации, устройств и событий.
 func (a *App) SubscribeMQTT() {
+	a.subscribeMQTT(a.mqtt)
+}
+
+func (a *App) subscribeMQTT(client mqtt.Client) {
 	seen := map[string]bool{}
 	for _, t := range a.cfg.MQTT.SubscribeTo {
-		a.subscribe(render(t, map[string]any{}), seen)
+		a.subscribe(client, render(t, map[string]any{"BaseTopic": a.cfg.MQTT.BaseTopics}), seen)
 	}
 	for _, d := range a.cfg.Devices {
 		for _, t := range d.Subscribe {
-			a.subscribe(a.RenderWithDevice(t, d, nil), seen)
+			a.subscribe(client, a.RenderWithDevice(t, d, nil), seen)
 		}
 		if d.ZigbeeID != "" {
-			a.subscribe(fmt.Sprintf("%s/%s", a.baseTopic(0), d.ZigbeeID), seen)
+			a.subscribe(client, fmt.Sprintf("%s/%s", a.baseTopic(0), d.ZigbeeID), seen)
 		}
 	}
-	for _, ci := range a.cfg.CommandIntegrations {
-		if !ci.Enabled {
-			continue
-		}
-		for _, d := range a.cfg.Devices {
-			if d.Type == "virtual" {
-				continue
-			}
-			for _, topicTpl := range commandIntegrationTopics(ci) {
-				a.subscribe(a.RenderWithDevice(topicTpl, d, nil), seen)
-			}
-		}
-	}
-	for _, ev := range a.cfg.Events {
-		if ev.OnTopic != "" {
-			a.subscribe(a.RenderTopic(ev.OnTopic, ev.DeviceID), seen)
-		}
-	}
-}
-
-// subscribe выполняет подписку на один MQTT-topic и не допускает повторных подписок.
-func (a *App) subscribe(topic string, seen map[string]bool) {
-	if topic == "" || seen[topic] {
-		return
-	}
-	seen[topic] = true
-	logDebug("mqtt subscribe: topic=%s", topic)
-	if token := a.mqtt.Subscribe(topic, a.cfg.MQTT.QOS, nil); token.Wait() && token.Error() != nil {
-		logError("subscribe %s error: %v", topic, token.Error())
-	}
-}
-
-// Publish отправляет payload в MQTT-topic с QoS и retained из конфигурации.
-func (a *App) Publish(topic, payload string) {
-	if topic == "" {
-		return
-	}
-	if token := a.mqtt.Publish(topic, a.cfg.MQTT.QOS, a.cfg.MQTT.Retained, payload); token.Wait() && token.Error() != nil {
-		logError("mqtt publish %s error: %v", topic, token.Error())
-	}
-}
-
-// OnMQTTMessage обрабатывает входящее MQTT-сообщение и запускает подходящие события из конфигурации.
-func (a *App) OnMQTTMessage(client mqtt.Client, msg mqtt.Message) {
-	payload := map[string]any{}
-	_ = json.Unmarshal(msg.Payload(), &payload)
-	raw := strings.TrimSpace(string(msg.Payload()))
-	logDebug("mqtt incoming: topic=%s payload=%q", msg.Topic(), raw)
-	if a.isCommandIntegrationCandidate(msg.Topic()) {
-		logInfo("command integration candidate: topic=%s payload=%q", msg.Topic(), raw)
-	}
-	if a.HandleCommandIntegration(msg.Topic(), raw) {
-		return
-	}
-	touched := false
-	handled := false
-	if deviceID := a.DeviceIDByTopic(msg.Topic()); deviceID != "" {
-		a.TouchDevice(deviceID)
-		touched = true
-		logDebug("mqtt message matched device: topic=%s device=%s", msg.Topic(), deviceID)
-	}
-	ctx := map[string]any{"Topic": msg.Topic(), "Payload": payload, "RawPayload": raw, "BoolPayload": isTruePayload(raw)}
-	for _, ev := range a.cfg.Events {
-		if ev.OnTopic != "" && !topicMatch(a.RenderTopic(ev.OnTopic, ev.DeviceID), msg.Topic()) {
-			continue
-		}
-		handled = true
-		if ev.DeviceID != "" {
-			if d, ok := a.devices[ev.DeviceID]; ok && d.ZigbeeID != "" && !strings.Contains(msg.Topic(), d.ZigbeeID) && !strings.Contains(msg.Topic(), d.YandexID) {
-				continue
-			}
-		}
-		prevState := map[string]any{}
-		if ev.DeviceID != "" {
-			prevState = a.getDeviceState(ev.DeviceID)
-		}
-		updated := false
-		if ev.DeviceID != "" {
-			updated = a.ApplyUpdates(ev.DeviceID, ev.Updates, payload, raw)
-		}
-		if !whenMatches(ev.When, payload, raw) {
-			if updated {
-				a.SaveState()
-			}
-			continue
-		}
-		if updated {
-			a.LogImportantStateChange(ev, prevState)
-		}
-		if isRepeatedTrueEvent(ev, prevState) {
-			logDebug("skip repeated true event: event=%s device=%s", ev.ID, ev.DeviceID)
-			if updated {
-				a.SaveState()
-			}
-			continue
-		}
-		if ev.DeviceID != "" {
-			if d, ok := a.devices[ev.DeviceID]; ok {
-				for _, r := range d.Reports {
-					value := evalReport(r, payload, raw)
-					if value == nil {
-						logDebug("report skipped: device=%s topic=%s expression=%q reason=nil", d.ID, a.RenderWithDevice(r.Topic, d, payload), r.Expression)
-						continue
-					}
-					a.Publish(a.RenderWithDevice(r.Topic, d, payload), fmt.Sprint(value))
-				}
-			}
-		}
-		for _, p := range ev.Publishes {
-			a.Publish(a.RenderTopic(p.Topic, ev.DeviceID), renderPayload(p.Payload, ctx))
-		}
-		for _, ref := range ev.Actions {
-			a.RunNamedAction(ref, 0)
-		}
-		if ev.Notify != nil {
-			a.Notify(ev.Notify, payload, raw)
-		}
-		a.SaveState()
-	}
-	if touched && !handled {
-		a.SaveState()
-	}
-}
-
-// HandleCommandIntegration обрабатывает команды внешних MQTT-интеграций, заданных в config.
-// Возвращает true если сообщение было обработано как команда интеграции.
-// При этом передаёт флаг fromIntegration=true чтобы предотвратить повторную публикацию
-// в топик интеграции из действия устройства (защита от петли).
-func (a *App) HandleCommandIntegration(topic string, raw string) bool {
 	for _, ci := range a.cfg.CommandIntegrations {
 		if !ci.Enabled {
 			continue
@@ -184,9 +102,205 @@ func (a *App) HandleCommandIntegration(topic string, raw string) bool {
 				continue
 			}
 			for _, topicTpl := range commandIntegrationTopics(ci) {
+				if topicTemplateApplies(d, topicTpl) {
+					a.subscribe(client, a.RenderWithDevice(topicTpl, d, nil), seen)
+				}
+			}
+		}
+	}
+	for _, ev := range a.cfg.Events {
+		if ev.OnTopic != "" {
+			a.subscribe(client, a.RenderTopic(ev.OnTopic, ev.DeviceID), seen)
+		}
+	}
+}
+
+// subscribe выполняет подписку на один MQTT-topic и не допускает повторных подписок.
+func (a *App) subscribe(client mqtt.Client, topic string, seen map[string]bool) {
+	if topic == "" || seen[topic] {
+		return
+	}
+	seen[topic] = true
+	logDebug("mqtt subscribe: topic=%s", topic)
+	token := client.Subscribe(topic, a.cfg.MQTT.QOS, nil)
+	if !token.WaitTimeout(5 * time.Second) {
+		logError("subscribe %s timed out", topic)
+		return
+	}
+	if token.Error() != nil {
+		logError("subscribe %s error: %v", topic, token.Error())
+		return
+	}
+	if result, ok := token.(*mqtt.SubscribeToken); ok && result.Result()[topic] == 0x80 {
+		logError("subscribe %s rejected by MQTT broker (check ACL)", topic)
+	}
+}
+
+// Publish отправляет payload в MQTT-topic с QoS и retained из конфигурации.
+func (a *App) Publish(topic, payload string) bool {
+	if topic == "" || a.mqtt == nil || !a.mqtt.IsConnectionOpen() {
+		logError("mqtt publish unavailable: topic=%s", topic)
+		return false
+	}
+	token := a.mqtt.Publish(topic, a.cfg.MQTT.QOS, a.cfg.MQTT.Retained, payload)
+	if !token.WaitTimeout(5 * time.Second) {
+		logError("mqtt publish %s timed out (delivery unknown)", topic)
+		return false
+	}
+	if token.Error() != nil {
+		logError("mqtt publish %s error: %v", topic, token.Error())
+		return false
+	}
+	return true
+}
+
+// OnMQTTMessage обрабатывает входящее MQTT-сообщение и запускает подходящие события из конфигурации.
+func (a *App) OnMQTTMessage(client mqtt.Client, msg mqtt.Message) {
+	a.eventMu.Lock()
+	defer a.eventMu.Unlock()
+	payload := map[string]any{}
+	_ = json.Unmarshal(msg.Payload(), &payload)
+	raw := strings.TrimSpace(string(msg.Payload()))
+	logDebug("mqtt incoming: topic=%s payload=%q", msg.Topic(), raw)
+	if a.isCommandIntegrationCandidate(msg.Topic()) {
+		logInfo("command integration candidate: topic=%s payload=%q", msg.Topic(), raw)
+	}
+	if a.HandleCommandIntegration(msg.Topic(), raw, msg.Retained()) {
+		return
+	}
+	// Состояние сохраняется на диск один раз в конце обработки сообщения,
+	// а не после каждого подходящего правила (меньше fsync и износа SD-карты).
+	dirty := false
+	defer func() {
+		if dirty {
+			a.SaveState()
+		}
+	}()
+	if deviceID := a.DeviceIDByTopic(msg.Topic()); deviceID != "" && !msg.Retained() {
+		a.TouchDevice(deviceID)
+		dirty = true
+		logDebug("mqtt message matched device: topic=%s device=%s", msg.Topic(), deviceID)
+	}
+	ctx := map[string]any{"Topic": msg.Topic(), "Payload": payload, "RawPayload": raw, "BoolPayload": isTruePayload(raw)}
+	reported := map[string]bool{}
+	for eventIndex, ev := range a.cfg.Events {
+		if ev.OnTopic != "" && !topicMatch(a.RenderTopic(ev.OnTopic, ev.DeviceID), msg.Topic()) {
+			continue
+		}
+		dirty = true
+		prevState := map[string]any{}
+		if ev.DeviceID != "" {
+			if !msg.Retained() {
+				a.TouchDevice(ev.DeviceID)
+			}
+			prevState = a.getDeviceState(ev.DeviceID)
+		}
+		// Частичные отчёты одного устройства объединяем для составных выражений.
+		// Retained-снимок не смешиваем с живым: он может быть старше сеанса.
+		values := payload
+		if ev.DeviceID != "" && !msg.Retained() {
+			if a.reportedPayloads[ev.DeviceID] == nil {
+				a.reportedPayloads[ev.DeviceID] = map[string]any{}
+			}
+			values = a.reportedPayloads[ev.DeviceID]
+			for field, value := range payload {
+				if a.reportFields[ev.DeviceID][field] {
+					values[field] = value
+				}
+			}
+		}
+		updated := false
+		if ev.DeviceID != "" {
+			updated = a.ApplyUpdates(ev.DeviceID, relevantUpdates(ev.Updates, payload), values, raw)
+		}
+		if !reported[ev.DeviceID] {
+			reported[ev.DeviceID] = true
+			if d, ok := a.devices[ev.DeviceID]; ok {
+				for _, report := range d.Reports {
+					if !reportHasIncomingField(report, payload) {
+						continue
+					}
+					if value := evalReport(report, values, raw); value != nil {
+						a.Publish(a.RenderWithDevice(report.Topic, d, payload), fmt.Sprint(value))
+					}
+				}
+			}
+		}
+		if updated {
+			a.LogImportantStateChange(ev, prevState)
+		}
+		allowRetained := false
+		if ev.AllowRetained != nil {
+			allowRetained = *ev.AllowRetained
+		}
+		if msg.Retained() && !allowRetained {
+			if len(ev.Actions) > 0 || len(ev.Publishes) > 0 || ev.Notify != nil {
+				logWarn("event ignored retained action: event=%s topic=%s", ev.ID, msg.Topic())
+			}
+			continue
+		}
+		if !whenMatches(ev.When, payload, raw) {
+			if conditionExplicitlyFalse(ev.When, payload, raw) {
+				a.eventActive[eventIndex] = false
+			}
+			continue
+		}
+		if hasTrueCondition(ev) && a.eventActive[eventIndex] {
+			logDebug("skip repeated true event: event=%s device=%s", ev.ID, ev.DeviceID)
+			continue
+		}
+		delivered := true
+		for _, p := range ev.Publishes {
+			ctx["BaseTopic"] = a.cfg.MQTT.BaseTopics
+			ctx["Device"] = a.devices[ev.DeviceID]
+			if !a.publishConfigured(p, ctx) {
+				delivered = false
+			}
+		}
+		// Результат нужен только аварийным событиям (уведомление, защита от повторов).
+		deferrable := ev.Notify == nil && !hasTrueCondition(ev)
+		for _, ref := range ev.Actions {
+			if !a.runEventAction(ref, deferrable) {
+				delivered = false
+			}
+		}
+		if ev.Notify != nil {
+			a.Notify(ev.Notify, ev.DeviceID, payload, raw, delivered)
+		}
+		if hasTrueCondition(ev) {
+			a.eventActive[eventIndex] = delivered
+		}
+	}
+}
+
+// HandleCommandIntegration обрабатывает команды внешних MQTT-интеграций, заданных в config.
+// Возвращает true если сообщение было обработано как команда интеграции.
+// При этом передаёт флаг fromIntegration=true чтобы предотвратить повторную публикацию
+// в топик интеграции из действия устройства (защита от петли).
+//
+// Retained-сообщения в командных топиках игнорируются: это последняя сохранённая брокером
+// команда (например, «включи воду» от Алисы), и её повторное выполнение при каждом
+// переподключении/перезапуске может, в частности, открыть воду во время протечки.
+func (a *App) HandleCommandIntegration(topic string, raw string, retained bool) bool {
+	for _, ci := range a.cfg.CommandIntegrations {
+		if !ci.Enabled {
+			continue
+		}
+		for _, d := range a.cfg.Devices {
+			if d.Type == "virtual" || !deviceHasCommandTopicData(d, ci) {
+				continue
+			}
+			for _, topicTpl := range commandIntegrationTopics(ci) {
+				if !topicTemplateApplies(d, topicTpl) {
+					continue
+				}
 				renderedTopic := a.RenderWithDevice(topicTpl, d, nil)
 				if !sameMQTTTopic(topic, renderedTopic) {
 					continue
+				}
+				if retained {
+					logWarn("command integration ignored retained message: integration=%s topic=%s payload=%q", ci.ID, topic, raw)
+					return true
 				}
 				action, ok := commandAction(ci, raw)
 				if !ok {
@@ -197,7 +311,10 @@ func (a *App) HandleCommandIntegration(topic string, raw string) bool {
 				// Команда пришла из внешней интеграции, поэтому:
 				// 1) можно принудительно выполнить действие, даже если локальный state устарел;
 				// 2) нельзя публиковать обратно в set-topic этой же интеграции.
-				a.RunDeviceActionFromIntegration(d.ID, action, ci.ID, ci.Force)
+				// Compound voice commands must also leave the receive worker.
+				a.dispatchCompound(d.ID+"."+action, false, func() (string, bool) {
+					return a.executeDeviceActionTraced(d.ID, action, 0, ci.ID, ci.Force, nil)
+				})
 				return true
 			}
 		}
@@ -239,12 +356,17 @@ func commandTopicPrefix(topicTpl string) string {
 // deviceHasCommandTopicData проверяет, есть ли у устройства данные для template topic.
 func deviceHasCommandTopicData(d DeviceConfig, ci CommandIntegrationConfig) bool {
 	for _, topicTpl := range commandIntegrationTopics(ci) {
-		if strings.Contains(topicTpl, ".Device.YandexID") && d.YandexID == "" {
+		if !topicTemplateApplies(d, topicTpl) {
 			continue
 		}
 		return true
 	}
 	return false
+}
+
+func topicTemplateApplies(d DeviceConfig, topicTpl string) bool {
+	return !(strings.Contains(topicTpl, ".Device.YandexID") && d.YandexID == "") &&
+		!(strings.Contains(topicTpl, ".Device.ZigbeeID") && d.ZigbeeID == "")
 }
 
 // sameMQTTTopic сравнивает MQTT topic, игнорируя лишний ведущий slash.
@@ -305,7 +427,7 @@ func isTruePayload(raw string) bool {
 // DeviceIDByTopic ищет устройство по MQTT-topic, сравнивая ZigbeeID и YandexID.
 func (a *App) DeviceIDByTopic(topic string) string {
 	for _, d := range a.cfg.Devices {
-		if d.ZigbeeID != "" && strings.Contains(topic, d.ZigbeeID) {
+		if d.ZigbeeID != "" && topic == fmt.Sprintf("%s/%s", a.baseTopic(0), d.ZigbeeID) {
 			return d.ID
 		}
 
@@ -323,17 +445,29 @@ func (a *App) TouchDevice(id string) {
 	a.state.Devices[id]["last_seen"] = time.Now().Unix()
 }
 
-// isRepeatedTrueEvent предотвращает повторные аварийные действия, если состояние уже было true.
-func isRepeatedTrueEvent(ev EventConfig, prevState map[string]any) bool {
-	if len(ev.When) == 0 || len(ev.Actions) == 0 && ev.Notify == nil {
+// Дедупликация живёт отдельно от сохранённого состояния и не зависит от порядка updates.
+func hasTrueCondition(ev EventConfig) bool {
+	if len(ev.Actions) == 0 && ev.Notify == nil && len(ev.Publishes) == 0 {
 		return false
 	}
-	for field, want := range ev.When {
-		wantBool, ok := toBool(want)
-		if !ok || !wantBool {
+	for _, value := range ev.When {
+		if b, ok := toBool(value); ok && b {
+			return true
+		}
+	}
+	return false
+}
+
+// Отсутствующее поле (например, в отчёте battery) не снимает блокировку повтора.
+func conditionExplicitlyFalse(when map[string]any, payload map[string]any, raw string) bool {
+	for field, want := range when {
+		if field == "$raw" {
+			if !valuesEqual(strings.TrimSpace(raw), want) {
+				return true
+			}
 			continue
 		}
-		if prevBool, ok := toBool(prevState[field]); ok && prevBool {
+		if got, ok := payload[field]; ok && !valuesEqual(got, want) {
 			return true
 		}
 	}
@@ -398,6 +532,9 @@ func whenMatches(when map[string]any, payload map[string]any, raw string) bool {
 
 // evalExpression вычисляет простое выражение из конфигурации для обновления состояния или отчёта.
 func evalExpression(expr string, payload map[string]any, raw string) any {
+	if validateExpression(expr) != nil {
+		return nil
+	}
 	if expr == "$raw_bool" {
 		v, ok := parseBoolPayload(raw)
 		if !ok {
@@ -409,85 +546,61 @@ func evalExpression(expr string, payload map[string]any, raw string) any {
 		return raw
 	}
 	if strings.HasPrefix(expr, "payload.") {
-		field := strings.TrimPrefix(expr, "payload.")
-		if value, ok := payload[field]; ok {
-			return value
-		}
+		return payload[strings.TrimPrefix(expr, "payload.")]
+	}
+	if !looksLikeExpression(expr) {
+		return expr
+	}
+	name, args, err := parseExpressionCall(expr)
+	if err != nil {
 		return nil
 	}
-	if strings.HasPrefix(expr, "eq(payload.") {
-		inside := strings.TrimSuffix(strings.TrimPrefix(expr, "eq(payload."), ")")
-		parts := strings.SplitN(inside, ",", 2)
-		if len(parts) == 2 {
-			field := strings.TrimSpace(parts[0])
-			value, ok := payload[field]
-			if !ok {
-				return nil
-			}
-			want := strings.Trim(strings.TrimSpace(parts[1]), "\"'")
-			return fmt.Sprint(value) == want
-		}
-	}
-	if strings.HasPrefix(expr, "ne(payload.") {
-		inside := strings.TrimSuffix(strings.TrimPrefix(expr, "ne(payload."), ")")
-		parts := strings.SplitN(inside, ",", 2)
-		if len(parts) == 2 {
-			field := strings.TrimSpace(parts[0])
-			value, ok := payload[field]
-			if !ok {
-				return nil
-			}
-			want := strings.Trim(strings.TrimSpace(parts[1]), "\"'")
-			return fmt.Sprint(value) != want
-		}
-	}
-	if strings.HasPrefix(expr, "and(") && strings.HasSuffix(expr, ")") {
-		inside := strings.TrimSuffix(strings.TrimPrefix(expr, "and("), ")")
-		for _, part := range splitArgs(inside) {
-			result := evalExpression(strings.TrimSpace(part), payload, raw)
-			if result == nil {
-				return nil
-			}
-			v, ok := result.(bool)
-			if !ok || !v {
-				return false
-			}
-		}
-		return true
-	}
-	if strings.HasPrefix(expr, "pressure_mmhg(payload.") {
-		field := strings.TrimSuffix(strings.TrimPrefix(expr, "pressure_mmhg(payload."), ")")
+	switch name {
+	case "eq", "ne":
+		field := strings.TrimPrefix(strings.TrimSpace(args[0]), "payload.")
 		value, ok := payload[field]
 		if !ok {
 			return nil
 		}
-		return math.Round(toFloat(value) / 1.333)
-	}
-	return expr
-}
-
-// splitArgs делит аргументы простых выражений конфигурации, не разрывая вложенные скобки.
-func splitArgs(s string) []string {
-	args := []string{}
-	depth := 0
-	start := 0
-	for i, r := range s {
-		switch r {
-		case '(':
-			depth++
-		case ')':
-			if depth > 0 {
-				depth--
+		want, _ := expressionLiteral(args[1])
+		equal := valuesEqual(value, want)
+		if name == "ne" {
+			return !equal
+		}
+		return equal
+	case "and":
+		missing := false
+		for _, arg := range args {
+			result := evalExpression(strings.TrimSpace(arg), payload, raw)
+			if result == nil {
+				missing = true
+				continue
 			}
-		case ',':
-			if depth == 0 {
-				args = append(args, s[start:i])
-				start = i + 1
+			v, ok := result.(bool)
+			if !ok {
+				return nil
+			}
+			if !v {
+				return false
 			}
 		}
+		if missing {
+			return nil
+		}
+		return true
+	case "pressure_mmhg":
+		field := strings.TrimPrefix(strings.TrimSpace(args[0]), "payload.")
+		value, ok := payload[field]
+		if !ok {
+			return nil
+		}
+		f, err := strconv.ParseFloat(fmt.Sprint(value), 64)
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil
+		}
+		return math.Round(f / 1.333)
 	}
-	args = append(args, s[start:])
-	return args
+	return nil
 }
 
 // evalReport вычисляет значение отчёта устройства для публикации в MQTT.
@@ -538,5 +651,17 @@ func toFloat(v any) float64 {
 
 // topicMatch проверяет совпадение MQTT-topic с точным шаблоном или wildcard /#.
 func topicMatch(pattern, topic string) bool {
-	return pattern == topic || pattern == "#" || strings.HasSuffix(pattern, "/#") && strings.HasPrefix(topic, strings.TrimSuffix(pattern, "#"))
+	if strings.HasPrefix(topic, "$") && !strings.HasPrefix(pattern, "$") {
+		return false
+	}
+	levels, actual := strings.Split(pattern, "/"), strings.Split(topic, "/")
+	for i, level := range levels {
+		if level == "#" {
+			return i == len(levels)-1
+		}
+		if i >= len(actual) || (level != "+" && level != actual[i]) {
+			return false
+		}
+	}
+	return len(levels) == len(actual)
 }

@@ -22,7 +22,7 @@ func (a *App) ConnectTelegram() (*tgbotapi.BotAPI, error) {
 		if err == nil {
 			return bot, nil
 		}
-		logWarn("telegram connect error, retry in 5s: %v", err)
+		logWarn("telegram connect error, retry in 5s: %v", a.telegramError(err))
 		time.Sleep(5 * time.Second)
 	}
 }
@@ -39,12 +39,26 @@ func (a *App) HTTPClient() (*http.Client, error) {
 		if pc.Username != "" {
 			auth = &proxy.Auth{User: pc.Username, Password: pc.Password}
 		}
-		dialer, err := proxy.SOCKS5("tcp", pc.Address, auth, proxy.Direct)
+		dialer, err := proxy.SOCKS5("tcp", pc.Address, auth, &net.Dialer{Timeout: 10 * time.Second})
 		if err != nil {
 			return nil, err
 		}
-		return &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) { return dialer.Dial(network, addr) }}, Timeout: time.Duration(a.cfg.Telegram.HTTPTimeoutSec) * time.Second}, nil
+		return &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.(proxy.ContextDialer).DialContext(ctx, network, addr)
+		}}, Timeout: time.Duration(a.cfg.Telegram.HTTPTimeoutSec) * time.Second}, nil
 	default:
 		return nil, fmt.Errorf("unsupported proxy type: %s", pc.Type)
 	}
+}
+
+// Ошибки HTTP могут включать URL с токеном бота.
+func (a *App) telegramError(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := err.Error()
+	if a.cfg.Telegram.Token != "" {
+		text = strings.ReplaceAll(text, a.cfg.Telegram.Token, "[REDACTED]")
+	}
+	return text
 }

@@ -12,8 +12,16 @@ User=smarthome
 Group=smarthome
 WorkingDirectory=/var/lib/smarthome
 
-# Create these paths manually or via tmpfiles/install script if your distribution requires it.
-ReadWritePaths=/var/lib/smarthome /var/log/smarthome
+# Сервис работает от пользователя smarthome: он должен иметь право записи в каталоги
+# storage.state_file и logging.file из конфига (например, /share и /var/log/SmartHome),
+# а также право чтения конфига и файлов video_monitoring.
+#
+# ReadWritePaths действует только вместе с ProtectSystem=strict/full. Если включаете
+# защиту, перечислите здесь ВСЕ каталоги, куда пишет SmartHome:
+#ProtectSystem=strict
+#ReadWritePaths=/var/lib/smarthome /var/log/smarthome
+KillSignal=SIGTERM
+TimeoutStopSec=10s
 
 [Install]
 WantedBy=multi-user.target

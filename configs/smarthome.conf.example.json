@@ -297,7 +297,8 @@
       "notify": {
         "users": "all",
         "text": "Water leak detected in kitchen!"
-      }
+      },
+      "allow_retained": true
     }
   ],
   "schedules": [

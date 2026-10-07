@@ -116,12 +116,19 @@ type DeviceConfig struct {
 }
 
 type ActionConfig struct {
-	Title        string          `json:"title"`
-	SetState     *bool           `json:"set_state,omitempty"`
-	Force        bool            `json:"force,omitempty"`
-	Publishes    []PublishConfig `json:"publishes"`
-	RunActions   []string        `json:"run_actions"`
-	SetUserVideo *bool           `json:"set_user_video,omitempty"`
+	Title        string           `json:"title"`
+	SetState     *bool            `json:"set_state,omitempty"`
+	Force        bool             `json:"force,omitempty"`
+	Publishes    []PublishConfig  `json:"publishes"`
+	RunActions   []string         `json:"run_actions"`
+	SetUserVideo *bool            `json:"set_user_video,omitempty"`
+	BlockWhen    []StateCondition `json:"block_when,omitempty"`
+}
+
+type StateCondition struct {
+	DeviceID string `json:"device_id"`
+	Field    string `json:"field"`
+	Value    any    `json:"value"`
 }
 
 type PublishConfig struct {
@@ -170,14 +177,15 @@ type MenuItem struct {
 }
 
 type EventConfig struct {
-	ID        string            `json:"id"`
-	OnTopic   string            `json:"on_topic"`
-	DeviceID  string            `json:"device_id"`
-	When      map[string]any    `json:"when"`
-	Updates   map[string]string `json:"updates"`
-	Publishes []PublishConfig   `json:"publishes"`
-	Actions   []string          `json:"actions"`
-	Notify    *NotifyConfig     `json:"notify,omitempty"`
+	ID            string            `json:"id"`
+	OnTopic       string            `json:"on_topic"`
+	DeviceID      string            `json:"device_id"`
+	When          map[string]any    `json:"when"`
+	Updates       map[string]string `json:"updates"`
+	AllowRetained *bool             `json:"allow_retained,omitempty"`
+	Publishes     []PublishConfig   `json:"publishes"`
+	Actions       []string          `json:"actions"`
+	Notify        *NotifyConfig     `json:"notify,omitempty"`
 }
 
 type NotifyConfig struct {
@@ -222,13 +230,43 @@ type UserState struct {
 }
 
 type App struct {
-	cfg       Config
-	state     State
-	stateMu   sync.RWMutex
-	devices   map[string]DeviceConfig
-	groups    map[string]GroupConfig
-	users     map[int64]UserConfig
-	menuIndex map[string]MenuItem
-	bot       *tgbotapi.BotAPI
-	mqtt      mqtt.Client
+	cfg              Config
+	state            State
+	stateMu          sync.RWMutex
+	stateVersions    map[string]uint64
+	devices          map[string]DeviceConfig
+	groups           map[string]GroupConfig
+	users            map[int64]UserConfig
+	menuIndex        map[string]MenuItem
+	bot              *tgbotapi.BotAPI
+	mqtt             mqtt.Client
+	saveMu           sync.Mutex
+	eventMu          sync.Mutex
+	eventActive      map[int]bool
+	runtime          map[string]*deviceRuntime
+	notifications    chan tgbotapi.MessageConfig
+	reportedPayloads map[string]map[string]any // защищено eventMu, только свежие поля текущего сеанса
+	reportFields     map[string]map[string]bool
+	mqttInbox        chan mqttTask
+	mqttWorkerOnce   sync.Once
+	// statePersistenceDisabled выставляется до запуска goroutine, если state-файл
+	// не удалось прочитать: сервис работает, но не затирает исходный файл.
+	statePersistenceDisabled bool
+	chainLocks               map[string]*sync.Mutex    // immutable after NewApp
+	unknownGuards            map[string]map[string]any // protected by stateMu
+	guardTypes               map[string]map[string]any // immutable after NewApp
+	deferMu                  sync.Mutex
+	deferredPending          map[string]int // protected by deferMu
+	deferredActions          chan deferredAction
+	deferWorkerOnce          sync.Once
+}
+
+type mqttTask struct {
+	message mqtt.Message
+	reset   bool
+}
+
+// deviceRuntime сериализует команды одного устройства.
+type deviceRuntime struct {
+	mu sync.Mutex
 }

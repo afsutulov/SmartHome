@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api"
+	"html"
 	"strconv"
 	"strings"
 	"time"
@@ -12,11 +13,11 @@ import (
 func (a *App) ProcessTelegram() {
 	updates, err := a.bot.GetUpdatesChan(tgbotapi.UpdateConfig{Timeout: a.cfg.Telegram.PollTimeoutSec})
 	if err != nil {
-		logError("telegram polling error: %v", err)
+		logError("telegram polling error: %v", a.telegramError(err))
 		return
 	}
 	for update := range updates {
-		if update.Message == nil {
+		if update.Message == nil || update.Message.From == nil || update.Message.Chat == nil {
 			continue
 		}
 		if !a.IsUserAllowed(int64(update.Message.From.ID)) {
@@ -55,7 +56,9 @@ func (a *App) HandleTelegramMessage(message *tgbotapi.Message) {
 	if message.Text == a.cfg.Menu.StartCommand || message.Text == "/start" {
 		msg := tgbotapi.NewMessage(message.Chat.ID, a.cfg.Telegram.WelcomeMessage)
 		msg.ReplyMarkup = a.BuildKeyboard()
-		a.bot.Send(msg)
+		if _, err := a.bot.Send(msg); err != nil {
+			logError("telegram reply error: %v", a.telegramError(err))
+		}
 		return
 	}
 	btnText := normalizeTelegramText(message.Text)
@@ -63,14 +66,18 @@ func (a *App) HandleTelegramMessage(message *tgbotapi.Message) {
 	var text string
 	if ok {
 		logDebug("telegram menu matched: chat=%d text=%q", message.Chat.ID, btnText)
-		text = a.ExecuteMenuItem(item, message.Chat.ID)
+		// Настройки видеоконтроля принадлежат пользователю (From.ID), а не чату:
+		// в групповом чате Chat.ID отличается от ID пользователя из allowed_users.
+		text = a.ExecuteMenuItem(item, int64(message.From.ID))
 	} else {
 		logWarn("telegram menu item not found: chat=%d text=%q", message.Chat.ID, btnText)
-		text = a.cfg.Labels.Unknown
+		text = html.EscapeString(a.cfg.Labels.Unknown)
 	}
 	msg := tgbotapi.NewMessage(message.Chat.ID, text)
 	msg.ParseMode = "HTML"
-	a.bot.Send(msg)
+	if _, err := a.bot.Send(msg); err != nil {
+		logError("telegram reply error: %v", a.telegramError(err))
+	}
 }
 
 // BuildKeyboard строит Telegram-клавиатуру из раздела menu конфигурационного файла.
@@ -158,24 +165,25 @@ func (a *App) RenderMenuText(item MenuItem) string {
 }
 
 // ExecuteMenuItem выполняет действие, связанное с пунктом Telegram-меню.
-func (a *App) ExecuteMenuItem(item MenuItem, chatID int64) string {
+// userID — Telegram ID пользователя, нажавшего кнопку (используется для пользовательских настроек).
+func (a *App) ExecuteMenuItem(item MenuItem, userID int64) string {
 	if item.Builtin != "" {
-		return a.RenderBuiltin(item.Builtin, chatID)
+		return a.RenderBuiltin(item.Builtin, userID)
 	}
 	if item.DeviceID != "" {
-		return a.RunDeviceAction(item.DeviceID, item.Action, chatID)
+		return a.RunDeviceAction(item.DeviceID, item.Action, userID)
 	}
 	if item.GroupID != "" {
-		return a.RunGroupAction(item.GroupID, item.Action, chatID)
+		return a.RunGroupAction(item.GroupID, item.Action, userID)
 	}
 	return a.cfg.Labels.Unknown
 }
 
 // RenderBuiltin выполняет встроенную команду меню: статус, тревоги или батарейки.
-func (a *App) RenderBuiltin(name string, chatID int64) string {
+func (a *App) RenderBuiltin(name string, userID int64) string {
 	switch name {
 	case "status":
-		return a.StatusText(chatID)
+		return a.StatusText(userID)
 	case "alarms":
 		return a.AlarmsText()
 	case "batteries":
@@ -186,15 +194,17 @@ func (a *App) RenderBuiltin(name string, chatID int64) string {
 }
 
 // StatusText формирует HTML-текст со статусом устройств и видеомониторинга.
-func (a *App) StatusText(chatID int64) string {
+// Все значения, пришедшие из MQTT/state, экранируются: иначе символы <, > или &
+// в payload ломают HTML-разметку, и Telegram отклоняет сообщение целиком.
+func (a *App) StatusText(userID int64) string {
 	var b strings.Builder
 	b.WriteString("<pre>\n")
 
 	if home := a.findDeviceWithState("home_mode"); home != nil {
 		st := a.getDeviceState(home.ID)
-		b.WriteString(fmt.Sprintf("<b>%-18s%v</b>\n", home.Name, st["state"]))
+		b.WriteString(fmt.Sprintf("%-18s%s\n", html.EscapeString(home.Name), a.onOffValue(st["state"])))
 	}
-	b.WriteString(fmt.Sprintf("<b>%-18s%v</b>\n\n", "Видеоконтроль", a.userVideoEnabled(chatID)))
+	b.WriteString(fmt.Sprintf("%-18s%s\n\n", "Видеоконтроль", a.boolLabel(a.userVideoEnabled(userID))))
 
 	for _, d := range a.cfg.Devices {
 		if d.Type != "switch" {
@@ -204,7 +214,7 @@ func (a *App) StatusText(chatID int64) string {
 		if _, ok := st["state"]; !ok {
 			continue
 		}
-		b.WriteString(fmt.Sprintf("%-18s%-18s%v\n", d.Name, formatUnix(st["last_seen"], a.cfg.Labels.DateTime), st["state"]))
+		b.WriteString(fmt.Sprintf("%-18s%-18s%s\n", html.EscapeString(d.Name), formatUnix(st["last_seen"], a.cfg.Labels.DateTime), a.onOffValue(st["state"])))
 	}
 
 	if weather := a.findWeatherDevice(); weather != nil {
@@ -216,7 +226,23 @@ func (a *App) StatusText(chatID int64) string {
 	}
 
 	b.WriteString("\n</pre>")
-	return strings.NewReplacer("false", a.cfg.Labels.Off, "true", a.cfg.Labels.On).Replace(b.String())
+	return b.String()
+}
+
+// onOffValue выводит булево значение состояния как метку ВКЛ/ВЫКЛ, остальное — экранированным текстом.
+func (a *App) onOffValue(v any) string {
+	if x, ok := v.(bool); ok {
+		return a.boolLabel(x)
+	}
+	return htmlValue(v)
+}
+
+// htmlValue безопасно превращает произвольное значение состояния в текст для HTML-режима Telegram.
+func htmlValue(v any) string {
+	if v == nil {
+		return "-"
+	}
+	return html.EscapeString(fmt.Sprint(v))
 }
 
 // findDeviceWithState ищет устройство по ID и проверяет, что у него есть поле state.
@@ -264,8 +290,15 @@ func (a *App) AlarmsText() string {
 	for _, d := range a.cfg.Devices {
 		if d.Type == "alarm" {
 			st := a.getDeviceState(d.ID)
-			leak, _ := toBool(st["water_leak"])
-			b.WriteString(fmt.Sprintf("%-32s%v\n", d.Name, leak))
+			leak, known := toBool(st["water_leak"])
+			label := a.cfg.Labels.No
+			if leak {
+				label = a.cfg.Labels.Yes
+			}
+			if !known {
+				label = "НЕИЗВЕСТНО"
+			}
+			b.WriteString(fmt.Sprintf("%-32s%s\n", html.EscapeString(d.Name), html.EscapeString(label)))
 			count++
 		}
 	}
@@ -274,7 +307,7 @@ func (a *App) AlarmsText() string {
 	}
 	b.WriteString("</pre>")
 	logInfo("telegram builtin rendered: alarms count=%d", count)
-	return strings.NewReplacer("false", a.cfg.Labels.No, "true", a.cfg.Labels.Yes).Replace(b.String())
+	return b.String()
 }
 
 // BatteriesText формирует HTML-текст с уровнем батарей устройств.
@@ -285,7 +318,7 @@ func (a *App) BatteriesText() string {
 	for _, d := range a.cfg.Devices {
 		st := a.getDeviceState(d.ID)
 		if battery, ok := st["battery"]; ok && battery != nil {
-			b.WriteString(fmt.Sprintf("%-32s%-16s%v%%\n", d.Name, formatUnix(st["last_seen"], a.cfg.Labels.DateTime), battery))
+			b.WriteString(fmt.Sprintf("%-32s%-16s%s%%\n", html.EscapeString(d.Name), formatUnix(st["last_seen"], a.cfg.Labels.DateTime), htmlValue(battery)))
 			count++
 		}
 	}
@@ -307,13 +340,17 @@ func formatUnix(v any, layout string) string {
 }
 
 // Notify отправляет уведомление Telegram-пользователям по правилу события.
-func (a *App) Notify(n *NotifyConfig, payload map[string]any, raw string) {
-	text := render(n.Text, map[string]any{"Payload": payload, "RawPayload": raw})
+func (a *App) Notify(n *NotifyConfig, deviceID string, payload map[string]any, raw string, actionsOK bool) {
+	text := render(n.Text, map[string]any{"Device": a.devices[deviceID], "BaseTopic": a.cfg.MQTT.BaseTopics, "Payload": payload, "RawPayload": raw, "ActionsOK": actionsOK})
 	for _, user := range a.cfg.Telegram.AllowedUsers {
 		if n.Users == "video_enabled" && !a.userVideoEnabled(user.ID) {
 			continue
 		}
-		a.bot.Send(tgbotapi.NewMessage(user.ID, text))
+		select {
+		case a.notifications <- tgbotapi.NewMessage(user.ID, text):
+		default:
+			logError("telegram notification queue full: user=%d", user.ID)
+		}
 	}
 }
 
@@ -325,17 +362,37 @@ func (a *App) userVideoEnabled(id int64) bool {
 }
 
 // setUserVideo включает или выключает видеомониторинг для конкретного Telegram-пользователя.
-func (a *App) setUserVideo(chatID int64, enabled bool) {
+func (a *App) setUserVideo(userID int64, enabled bool) {
 	a.stateMu.Lock()
-	a.state.Users[fmt.Sprint(chatID)] = UserState{VideoMonitoringEnabled: enabled}
+	a.state.Users[fmt.Sprint(userID)] = UserState{VideoMonitoringEnabled: enabled}
 	a.stateMu.Unlock()
 	a.SaveState()
 }
 
-// boolLabel переводит bool-значение в пользовательскую метку ВКЛ/ВЫКЛ из конфигурации.
+// boolLabel переводит bool-значение в пользовательскую метку ВКЛ/ВЫКЛ из конфигурации (HTML-безопасно).
 func (a *App) boolLabel(v bool) string {
 	if v {
-		return a.cfg.Labels.On
+		return html.EscapeString(a.cfg.Labels.On)
 	}
-	return a.cfg.Labels.Off
+	return html.EscapeString(a.cfg.Labels.Off)
+}
+
+// Telegram не задерживает закрытие кранов и обработку следующей протечки.
+func (a *App) RunNotifications() {
+	for message := range a.notifications {
+		if _, err := a.bot.Send(message); err != nil {
+			logError("telegram notification send failed: user=%d error=%v", message.ChatID, a.telegramError(err))
+		}
+	}
+}
+
+// notifyAllUsers ставит служебное сообщение в очередь для всех разрешённых пользователей.
+func (a *App) notifyAllUsers(text string) {
+	for _, user := range a.cfg.Telegram.AllowedUsers {
+		select {
+		case a.notifications <- tgbotapi.NewMessage(user.ID, text):
+		default:
+			logError("telegram notification queue full: user=%d", user.ID)
+		}
+	}
 }

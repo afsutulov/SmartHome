@@ -9,6 +9,9 @@ import (
 	"strings"
 )
 
+// Вывод через log.Output(2, ...) нужен, чтобы Lshortfile показывал место вызова
+// logInfo/logWarn/..., а не строку внутри logging.go.
+//
 // initLogging настраивает стандартный logger: уровень, вывод в файл и/или консоль.
 func initLogging(cfg LoggingConfig) error {
 	switch strings.ToLower(cfg.Level) {
@@ -46,27 +49,27 @@ func initLogging(cfg LoggingConfig) error {
 // logDebug пишет диагностическое сообщение, если включён уровень debug.
 func logDebug(format string, args ...any) {
 	if currentLogLevel <= levelDebug {
-		log.Printf("[DEBUG] "+format, args...)
+		_ = log.Output(2, fmt.Sprintf("[DEBUG] "+format, args...))
 	}
 }
 
 // logInfo пишет информационное сообщение, если включён уровень info или debug.
 func logInfo(format string, args ...any) {
 	if currentLogLevel <= levelInfo {
-		log.Printf("[INFO] "+format, args...)
+		_ = log.Output(2, fmt.Sprintf("[INFO] "+format, args...))
 	}
 }
 
 // logWarn пишет предупреждение, если включён уровень warn, info или debug.
 func logWarn(format string, args ...any) {
 	if currentLogLevel <= levelWarn {
-		log.Printf("[WARN] "+format, args...)
+		_ = log.Output(2, fmt.Sprintf("[WARN] "+format, args...))
 	}
 }
 
 // logError пишет сообщение об ошибке независимо от уровня, кроме случаев прямого отключения логгера.
 func logError(format string, args ...any) {
 	if currentLogLevel <= levelError {
-		log.Printf("[ERROR] "+format, args...)
+		_ = log.Output(2, fmt.Sprintf("[ERROR] "+format, args...))
 	}
 }
